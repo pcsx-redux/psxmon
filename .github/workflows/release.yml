@@ -41,6 +41,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check Cargo.toml version
+        if: runner.os == 'Linux'
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "Cargo.toml version: $VERSION"
+          TAG_NAME="${{ github.ref_name }}"
+          echo "Tag name: $TAG_NAME"
+          if [ "$VERSION" != "$TAG_NAME" ]; then
+            echo "Version mismatch: Cargo.toml version ($VERSION) does not match tag name ($TAG_NAME)"
+            exit 1
+          fi
       - name: Install libudev
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
