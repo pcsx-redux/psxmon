@@ -204,6 +204,12 @@ impl Rsp {
     }
 
     fn cmd(&mut self, body: &str) -> String {
+        self.send(body);
+        self.reply()
+    }
+
+    /// Send `body` and wait for the server's ack.
+    fn send(&mut self, body: &str) {
         let sum = body.bytes().fold(0u8, u8::wrapping_add);
         let pkt = format!("${body}#{sum:02x}");
         self.s.write_all(pkt.as_bytes()).expect("send");
@@ -214,10 +220,21 @@ impl Rsp {
                 other => panic!("expected ack, got {other:#x}"),
             }
         }
-        self.reply()
     }
 
+    /// The next packet's body, acked.
     fn reply(&mut self) -> String {
+        let r = self.recv();
+        self.ack();
+        r
+    }
+
+    fn ack(&mut self) {
+        self.s.write_all(b"+").expect("ack");
+    }
+
+    /// The next packet's body, not yet acked.
+    fn recv(&mut self) -> String {
         while self.byte() != b'$' {}
         let mut raw = Vec::new();
         loop {
@@ -228,7 +245,6 @@ impl Rsp {
             raw.push(b);
         }
         let _ = (self.byte(), self.byte());
-        self.s.write_all(b"+").expect("ack");
         // Undo run-length encoding: `X*n` repeats X n - 29 more times.
         let mut out: Vec<u8> = Vec::new();
         let mut it = raw.into_iter();
@@ -503,6 +519,35 @@ fn rsp_console_text_as_o_packets() {
     g.cmd("qSupported:swbreak+");
     let mut got = String::new();
     let mut r = g.cmd("c");
+    while let Some(hex) = r.strip_prefix('O') {
+        got.push_str(hex);
+        r = g.reply();
+    }
+    assert_eq!(got, "68690a", "O packets before the stop");
+    assert_eq!(r, "W2a");
+    let (_, code) = rig.server.join().expect("server thread");
+    assert_eq!(code, Some(42));
+}
+
+/// A gdb slow to ack the `O` packets (a stalled process on a loaded
+/// machine) still gets to ack the stop reply. The stub waits for the acks
+/// it is owed before closing; closing on a timer instead would meet the
+/// late ack with RST, and the ack after it would fail with EPIPE.
+#[test]
+fn rsp_late_acks_after_exit() {
+    let rig = rig(&print_program(
+        b"hi
+",
+    ));
+    let mut g = Rsp::connect(rig.port);
+    g.cmd("qSupported:swbreak+");
+    g.send("c");
+    let mut r = g.recv();
+    assert!(r.starts_with('O'), "{r}");
+    // Longer than any timer the stub could reasonably close on.
+    std::thread::sleep(Duration::from_millis(1000));
+    g.ack();
+    let mut got = String::new();
     while let Some(hex) = r.strip_prefix('O') {
         got.push_str(hex);
         r = g.reply();
