@@ -83,6 +83,8 @@ const STOP_RESEND: Duration = Duration::from_secs(1);
 const O_CHUNK: usize = 512;
 /// Most console text held for gdb; past it, newer text is dropped.
 const O_HELD_MAX: usize = 64 << 10;
+/// Longest wait for gdb's acks of the last packets when closing the link.
+const CLOSE_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `break 0x3ff, 0`: the word psxmon plants for a single step and at a
 /// program's entry. Any other `break` is the program's or gdb's.
@@ -153,6 +155,8 @@ pub struct MonTarget<T: Transport> {
     pub verbose: bool,
     /// Console text not yet sent to gdb.
     gdb_text: Arc<Mutex<Vec<u8>>>,
+    /// `O` packets sent since the last resume whose `+` gdbstub has not read.
+    acks_owed: usize,
 }
 
 impl<T: Transport> MonTarget<T> {
@@ -183,6 +187,7 @@ impl<T: Transport> MonTarget<T> {
             exit_code: None,
             verbose: false,
             gdb_text,
+            acks_owed: 0,
         }
     }
 
@@ -266,7 +271,9 @@ impl<T: Transport> MonTarget<T> {
         let gdb = GdbStub::new(conn);
         let r = gdb.run_blocking::<EventLoop<T>>(self);
         if let Some(sock) = linger {
-            close_gently(&sock);
+            // gdbstub answers everything but `k` with a packet gdb acks.
+            let last = usize::from(!matches!(r, Ok(DisconnectReason::Kill)));
+            close_gently(&sock, self.acks_owed.saturating_add(last));
         }
         match r {
             Ok(reason) => Ok(reason),
@@ -323,6 +330,7 @@ impl<T: Transport> MonTarget<T> {
     }
 
     fn do_continue(&mut self) -> Res<()> {
+        self.acks_owed = 0;
         self.sync_hw();
         self.regs = None;
         self.rt.block_on(self.sess.cont())?;
@@ -331,6 +339,7 @@ impl<T: Transport> MonTarget<T> {
     }
 
     fn do_step(&mut self) -> Res<()> {
+        self.acks_owed = 0;
         let regs = self.regs()?;
         let pc = regs.get(usize::from(REG_PC)).copied().unwrap_or(0);
         let insn = self.read_word(pc)?;
@@ -851,21 +860,29 @@ impl<T: Transport> MemoryMap for MonTarget<T> {
     }
 }
 
-/// Close the gdb link without a reset: a socket closed with unread input
-/// (gdb's `+` for the last `O` packets, when the stop came in the same
-/// wait) sends RST, and gdb can then lose the stop reply still in its
-/// buffer. Send FIN, read until gdb closes or a short while passes.
-fn close_gently(sock: &TcpStream) {
+/// Close the gdb link without a reset. A socket closed with unread input
+/// sends RST, and gdb then loses what it has not read yet, the stop reply
+/// included; input arriving after the close is met with RST too. What is
+/// still to come is known: gdb's `+` for each of the `owed` packets (none
+/// in no-ack mode, which the tests do not offer). Send FIN, then read
+/// until they are all in, gdb closes, or [`CLOSE_ACK_TIMEOUT`] passes
+/// with nothing read. A timer alone would be a race against a slow gdb.
+fn close_gently(sock: &TcpStream, mut owed: usize) {
     use std::io::Read;
     let _ = sock.shutdown(std::net::Shutdown::Write);
-    let _ = sock.set_read_timeout(Some(Duration::from_millis(100)));
-    let until = Instant::now().checked_add(Duration::from_millis(500));
+    // gdbstub's `peek` leaves the socket non-blocking; a read would then
+    // fail at once with WouldBlock and the acks would never be waited for.
+    let _ = sock.set_nonblocking(false);
+    let _ = sock.set_read_timeout(Some(CLOSE_ACK_TIMEOUT));
     let mut buf = [0u8; 256];
     let mut r: &TcpStream = sock;
-    while until.is_some_and(|t| Instant::now() < t) {
+    while owed > 0 {
         match r.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(_) => {}
+            Ok(n) => {
+                let acks = buf.get(..n).unwrap_or_default();
+                owed = owed.saturating_sub(acks.iter().filter(|&&b| b == b'+').count());
+            }
         }
     }
 }
@@ -895,14 +912,19 @@ fn console_packets(text: &[u8]) -> Vec<Vec<u8>> {
 
 /// Send gdb the console text held so far. Only while the target runs: an
 /// `O` packet is legal between a resume and its stop reply. gdb acks each
-/// with `+` (outside no-ack mode), which gdbstub reads and ignores.
-fn send_console<T: Transport>(target: &MonTarget<T>, conn: &mut TcpStream) -> std::io::Result<()> {
+/// with `+`, which gdbstub reads and ignores; each is counted as owed
+/// until read, so the link can be closed once they are all in.
+fn send_console<T: Transport>(
+    target: &mut MonTarget<T>,
+    conn: &mut TcpStream,
+) -> std::io::Result<()> {
     let text = target.take_gdb_text();
     if text.is_empty() {
         return Ok(());
     }
     for pkt in console_packets(&text) {
         conn.write_all(&pkt)?;
+        target.acks_owed = target.acks_owed.saturating_add(1);
     }
     Connection::flush(conn)
 }
@@ -931,6 +953,11 @@ impl<T: Transport> BlockingEventLoop for EventLoop<T> {
                 .is_some()
             {
                 let byte = conn.read().map_err(WaitForStopReasonError::Connection)?;
+                // While the target runs gdb only sends `+` and ^C: a `+`
+                // here is the ack of an `O` packet, read before the stop.
+                if byte == b'+' {
+                    target.acks_owed = target.acks_owed.saturating_sub(1);
+                }
                 return Ok(Event::IncomingData(byte));
             }
             let stopped = target.poll().map_err(WaitForStopReasonError::Target)?;
