@@ -244,11 +244,11 @@ submodule. The links fetch the latest release.
 | File | What it is | Link | How to use it | Run on hardware |
 |---|---|---|---|---|
 | [`psxmon-linux-x86_64`](https://github.com/pcsx-redux/psxmon/releases/latest/download/psxmon-linux-x86_64) | psxmon, Linux x86_64 | - | `chmod +x`, run | yes |
-| [`psxmon-windows-x86_64.exe`](https://github.com/pcsx-redux/psxmon/releases/latest/download/psxmon-windows-x86_64.exe) | psxmon, Windows x86_64 | - | run from a terminal | v0.1.0 fails ([#6](https://github.com/pcsx-redux/psxmon/issues/6)) |
+| [`psxmon-windows-x86_64.exe`](https://github.com/pcsx-redux/psxmon/releases/latest/download/psxmon-windows-x86_64.exe) | psxmon, Windows x86_64 | - | run from a terminal | yes since v0.4.0 (FT232R, Power Replay FT232H); earlier releases fail ([#6](https://github.com/pcsx-redux/psxmon/issues/6)) |
 | [`psxmon-macos-arm64`](https://github.com/pcsx-redux/psxmon/releases/latest/download/psxmon-macos-arm64) | psxmon, macOS arm64 | - | `chmod +x`, run | not run |
-| [`monitor-sio1.ps-exe`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-sio1.ps-exe) | monitor on the retail BIOS | SIO1 | load it with any PS-EXE loader | not recorded |
+| [`monitor-sio1.ps-exe`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-sio1.ps-exe) | monitor on the retail BIOS | SIO1 | load it with any PS-EXE loader | SCPH-1001, loaded from the cart monitor; it then runs without the exception slot (caps 0x0003) until [nugget#113](https://github.com/pcsx-redux/nugget/pull/113) |
 | [`monitor-sio1.zip`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-sio1.zip) | disc image of the above (`.bin` + `.cue`) | SIO1 | burn it, boot it | as the `.ps-exe` |
-| [`monitor-sio1-cart.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-sio1-cart.rom) | monitor on the retail BIOS, cartridge | SIO1 | flash a cartridge; boots into the monitor | yes |
+| [`monitor-sio1-cart.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-sio1-cart.rom) | monitor on the retail BIOS, cartridge | SIO1 | flash a cartridge; boots into the monitor | SCPH-1001 (Power Replay) |
 | [`monitor-ft232h-psx232h-a20.ps-exe`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-psx232h-a20.ps-exe) | monitor on the retail BIOS | FT232H, psx232h, A0 on A20 | load it with any PS-EXE loader | no |
 | [`monitor-ft232h-psx232h-a20.zip`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-psx232h-a20.zip) | disc image of the above | FT232H, psx232h, A0 on A20 | burn it, boot it | as the `.ps-exe` |
 | [`monitor-ft232h-psx232h-a0.ps-exe`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-psx232h-a0.ps-exe) | monitor on the retail BIOS | FT232H, psx232h, A0 on A0 | load it with any PS-EXE loader | no |
@@ -261,7 +261,8 @@ submodule. The links fetch the latest release.
 | [`monitor-ft232h-piodev-lite.zip`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-piodev-lite.zip) | disc image of the above | FT232H, PIO-Dev-Lite | burn it, boot it | as the `.ps-exe` |
 | [`monitor-ft232h-orion.ps-exe`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-orion.ps-exe) | monitor on the retail BIOS | FT232H-style link, Orion cart | load it with any PS-EXE loader | SCPH-1001, SCPH-7502 |
 | [`monitor-ft232h-orion.zip`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-orion.zip) | disc image of the above | FT232H-style link, Orion cart | burn it, boot it | as the `.ps-exe` |
-| [`openbios-sio1-cart.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-sio1-cart.rom) | OpenBIOS with the monitor, cartridge | SIO1 | flash a cartridge; OpenBIOS takes over at boot | Redux only |
+| `monitor-ft232h-powerreplay.ps-exe` (once [nugget#113](https://github.com/pcsx-redux/nugget/pull/113) is in) | monitor on the retail BIOS | FT232H, Power Replay with the PowerReplayUSB mod | load it with any PS-EXE loader | SCPH-1001, Linux and Windows (the #113 build) |
+| [`openbios-sio1-cart.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-sio1-cart.rom) | OpenBIOS with the monitor, cartridge | SIO1 | flash a cartridge; OpenBIOS takes over at boot | SCPH-1001 (Power Replay), except LZ4 loads: use `--no-lz4` ([nugget#120](https://github.com/pcsx-redux/nugget/issues/120)) |
 | [`openbios-sio1.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-sio1.rom) | OpenBIOS with the monitor, 512 KiB BIOS ROM | SIO1 | program a replacement BIOS chip | Redux only |
 | [`openbios-ft232h-psx232h-a20.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-ft232h-psx232h-a20.rom) | OpenBIOS with the monitor, 512 KiB BIOS ROM | FT232H, psx232h, A0 on A20 | program a replacement BIOS chip | no |
 | [`openbios-ft232h-psx232h-a0.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-ft232h-psx232h-a0.rom) | OpenBIOS with the monitor, 512 KiB BIOS ROM | FT232H, psx232h, A0 on A0 | program a replacement BIOS chip | no |
@@ -270,7 +271,7 @@ submodule. The links fetch the latest release.
 | [`openbios-ft232h-piodev-lite.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-ft232h-piodev-lite.rom) | OpenBIOS with the monitor, 512 KiB BIOS ROM | FT232H, PIO-Dev-Lite | program a replacement BIOS chip | no |
 | [`openbios-ft232h-orion.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-ft232h-orion.rom) | OpenBIOS with the monitor, 512 KiB BIOS ROM | FT232H-style link, Orion cart | program a replacement BIOS chip | no |
 | [`openbios-ft232h-piodev-lite-cart.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-ft232h-piodev-lite-cart.rom) | OpenBIOS with the monitor, cartridge | FT232H, PIO-Dev-Lite | flash the PIO-Dev-Lite; OpenBIOS takes over at boot | no |
-| [`openbios-atcons-h2700.elf`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-atcons-h2700.elf) | OpenBIOS with the monitor, for the DTL-H2700 | ATCONS | `psxmon patch-h2700`, flash, reset mode 7; psxmon has no ATCONS link yet ([#3](https://github.com/pcsx-redux/psxmon/issues/3)) | yes |
+| [`openbios-atcons-h2700.elf`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-atcons-h2700.elf) | OpenBIOS with the monitor, for the DTL-H2700 | ATCONS | `psxmon patch-h2700 stock.bin openbios-atcons-h2700.elf -o flash.bin`, flash, reset mode 7, then `psxmon ... --port atcons` | yes |
 
 ## Build
 
