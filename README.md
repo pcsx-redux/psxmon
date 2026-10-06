@@ -226,7 +226,7 @@ Use it with `gdb-multiarch` or any `mips` gdb:
   and `break`, overflowing `add`/`addi`/`sub`, unaligned accesses, I/O and
   other memory, a successor PC outside RAM and BIOS, accesses meeting the
   watch, the ROM breakpoint on a stepped instruction, and SR with IsC, SwC,
-  RE or KUc set. A simulated step takes no interrupt (a stepped wait for a
+  RE or a user-mode bit (KUc or KUp) set. A simulated step takes no interrupt (a stepped wait for a
   flag an interrupt handler sets never ends; use `continue`).
   `--real-step` or `PSXMON_STEP_SIM=0` steps everything on the target.
 - Ctrl-C stops a running target at its next interrupt when the monitor

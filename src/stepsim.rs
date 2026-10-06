@@ -23,7 +23,7 @@
 //! accesses, any access outside the regions above (I/O, EXP1/2, RAM
 //! mirrors past 2 MiB, kseg2, kuseg above 0x20000000), a successor PC
 //! outside RAM or BIOS, an access that meets the armed watch, an exec
-//! breakpoint on an instruction the step runs, SR with IsC, SwC, RE or KUc
+//! breakpoint on an instruction the step runs, SR with IsC, SwC, RE, KUc or KUp
 //! set, a branch in a delay slot, a delay slot that reads or writes the
 //! register its branch links, jalr with rd = rs, and bltzal/bgezal on r31.
 //!
@@ -75,7 +75,10 @@ pub enum Outcome {
 }
 
 /// SR bits under which the host cannot mirror what a load or store does.
+/// The saved SR is the one after exception entry pushed the mode stack, so
+/// the halted context's own mode is KUp (RFE pops it back into KUc).
 const SR_KUC: u32 = 1 << 1;
+const SR_KUP: u32 = 1 << 3;
 const SR_ISC: u32 = 1 << 16;
 const SR_SWC: u32 = 1 << 17;
 const SR_RE: u32 = 1 << 25;
@@ -634,7 +637,7 @@ pub fn step<B: Bus>(regs: &mut Regs, g: &Guards, bus: &mut B) -> Result<Outcome,
     if sr & (SR_ISC | SR_SWC) != 0 {
         return Ok(Outcome::Fallback("cache isolated or swapped (SR IsC/SwC)"));
     }
-    if sr & (SR_KUC | SR_RE) != 0 {
+    if sr & (SR_KUC | SR_KUP | SR_RE) != 0 {
         return Ok(Outcome::Fallback("user mode or reverse endian"));
     }
     let pc = reg(regs, usize::from(REG_PC));

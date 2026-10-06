@@ -143,6 +143,7 @@ fn check(name: &str, case: &Case) -> Machine {
     for (n, want) in case.steps.iter().enumerate() {
         let pc = oracle.reg(REG_PC);
         let mut regs = target.regs;
+        let ram_before = target.ram.clone();
         let got = stepsim::step(&mut regs, &case.guards, &mut MachineBus(&mut target))
             .expect("infallible");
         let truth = Interp::host_step(&mut oracle);
@@ -170,10 +171,7 @@ fn check(name: &str, case: &Case) -> Machine {
                     "{name} step {n} at 0x{pc:08x}: fell back for {got:?}, want {why:?}"
                 );
                 assert_eq!(regs, target.regs, "{name} step {n}: fallback changed regs");
-                assert!(
-                    target.ram == oracle.ram || truth.is_ok(),
-                    "{name}: fallback wrote"
-                );
+                assert!(target.ram == ram_before, "{name}: fallback wrote");
                 // The target would run it; carry on from the interpreter's
                 // state when it could, else the case is over.
                 if truth.is_err() {
@@ -592,6 +590,7 @@ fn debug_unit_and_sr_fall_back() {
         (RUN_SR | 1 << 16, "IsC"),
         (RUN_SR | 1 << 17, "SwC"),
         (RUN_SR | 2, "user mode"),
+        (RUN_SR | 1 << 3, "user mode"),
     ] {
         check(
             why,
