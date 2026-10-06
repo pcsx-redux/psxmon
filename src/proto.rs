@@ -54,6 +54,10 @@ pub const CAP_STOP: u16 = 0x0002;
 /// handler's patch slot, ahead of the handler chains, so a program that
 /// resets the chains keeps it.
 pub const CAP_SLOT: u16 = 0x0004;
+/// Capability bit: the link holds a whole bulk frame while the monitor is
+/// busy with the previous one, so WRITE_MEM/LOAD frames may be sent ahead of
+/// their ACKs (FT232H; never SIO1, whose FIFO overruns).
+pub const CAP_PIPELINE: u16 = 0x0008;
 
 // ERROR codes.
 pub const E_BADCMD: u16 = 0x01;
