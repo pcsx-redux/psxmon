@@ -110,6 +110,11 @@ struct GdbArgs {
     /// Serve PCDRV file I/O from this directory.
     #[arg(long, value_name = "DIR")]
     pcdrv: Option<PathBuf>,
+    /// Run every single step on the target (plant a break, CONT, stop)
+    /// instead of simulating it on the host where possible. Also set by
+    /// PSXMON_STEP_SIM=0.
+    #[arg(long)]
+    real_step: bool,
 }
 
 #[derive(Subcommand)]
@@ -477,6 +482,7 @@ fn gdb(args: GdbArgs) -> Result<ExitCode> {
         no_lz4,
         max_match,
         pcdrv,
+        real_step,
     } = args;
     let verbose = link.verbose;
     if max_match < 7 {
@@ -506,6 +512,7 @@ fn gdb(args: GdbArgs) -> Result<ExitCode> {
     s.set_console(Some(stdout_console()));
     let mut t = MonTarget::new(rt, s, server);
     t.verbose = verbose;
+    t.step_sim = !real_step && psxmon::gdb::step_sim_from_env();
     if let Some(img) = &image {
         let opts = LoadOptions {
             lz4: !no_lz4,

@@ -140,7 +140,11 @@ impl Machine {
         self.regs.get(usize::from(index)).copied().unwrap_or(0)
     }
 
+    /// r0 stays 0.
     pub fn set(&mut self, index: u16, value: u32) {
+        if index == 0 {
+            return;
+        }
         if let Some(r) = self.regs.get_mut(usize::from(index)) {
             *r = value;
         }
@@ -730,6 +734,58 @@ impl Default for Interp {
     }
 }
 
+/// mult, multu, div, divu (funct 0x18..0x1b) as PCSX-Redux computes them:
+/// (LO, HI).
+fn muldiv(funct: u32, rs: u32, rt: u32) -> (u32, u32) {
+    match funct {
+        0x18 => {
+            let p = i64::from(rs.cast_signed())
+                .wrapping_mul(i64::from(rt.cast_signed()))
+                .cast_unsigned();
+            halves(p)
+        }
+        0x19 => halves(u64::from(rs).wrapping_mul(u64::from(rt))),
+        0x1a => {
+            if rt == 0 {
+                (
+                    if rs & 0x8000_0000 != 0 {
+                        1
+                    } else {
+                        0xffff_ffff
+                    },
+                    rs,
+                )
+            } else if rs == 0x8000_0000 && rt == 0xffff_ffff {
+                (0x8000_0000, 0)
+            } else {
+                let (n, d) = (rs.cast_signed(), rt.cast_signed());
+                (
+                    n.checked_div(d).expect("no overflow").cast_unsigned(),
+                    n.checked_rem(d).expect("no overflow").cast_unsigned(),
+                )
+            }
+        }
+        _ => {
+            if rt == 0 {
+                (0xffff_ffff, rs)
+            } else {
+                (
+                    rs.checked_div(rt).expect("rt != 0"),
+                    rs.checked_rem(rt).expect("rt != 0"),
+                )
+            }
+        }
+    }
+}
+
+/// (low, high) words of a 64-bit product.
+fn halves(p: u64) -> (u32, u32) {
+    (
+        u32::try_from(p & 0xffff_ffff).expect("32 bits"),
+        u32::try_from(p >> 32).expect("32 bits"),
+    )
+}
+
 fn sext(imm: u32) -> u32 {
     i32::from(u16::try_from(imm & 0xffff).expect("16 bits").cast_signed()).cast_unsigned()
 }
@@ -756,12 +812,38 @@ impl Interp {
                     0x00 => rt.wrapping_shl(sh),
                     0x02 => rt.wrapping_shr(sh),
                     0x03 => rt.cast_signed().wrapping_shr(sh).cast_unsigned(),
+                    0x04 => rt.wrapping_shl(rs & 31),
+                    0x06 => rt.wrapping_shr(rs & 31),
+                    0x07 => rt.cast_signed().wrapping_shr(rs & 31).cast_unsigned(),
                     0x08 => return Effect::Branch(Some(rs)),
                     0x09 => {
                         m.set(rd_i, link);
                         return Effect::Branch(Some(rs));
                     }
                     0x0d => return Effect::Break,
+                    0x10 => m.reg(REG_HI),
+                    0x12 => m.reg(REG_LO),
+                    0x11 | 0x13 => {
+                        m.set(if insn & 0x3f == 0x11 { REG_HI } else { REG_LO }, rs);
+                        return Effect::Seq;
+                    }
+                    0x18..=0x1b => {
+                        let (lo, hi) = muldiv(insn & 0x3f, rs, rt);
+                        m.set(REG_LO, lo);
+                        m.set(REG_HI, hi);
+                        return Effect::Seq;
+                    }
+                    // Ov: the destination is left alone.
+                    0x20 if (rs ^ rt) & 0x8000_0000 == 0
+                        && (rs ^ rs.wrapping_add(rt)) & 0x8000_0000 != 0 =>
+                    {
+                        return Effect::Fault(12);
+                    }
+                    0x22 if (rs ^ rt) & 0x8000_0000 != 0
+                        && (rs ^ rs.wrapping_sub(rt)) & 0x8000_0000 != 0 =>
+                    {
+                        return Effect::Fault(12);
+                    }
                     0x20 | 0x21 => rs.wrapping_add(rt),
                     0x22 | 0x23 => rs.wrapping_sub(rt),
                     0x24 => rs & rt,
@@ -794,6 +876,11 @@ impl Interp {
             5 => cond(rs != rt),
             6 => cond(rs.cast_signed() <= 0),
             7 => cond(rs.cast_signed() > 0),
+            8 if (rs ^ simm) & 0x8000_0000 == 0
+                && (rs ^ rs.wrapping_add(simm)) & 0x8000_0000 != 0 =>
+            {
+                Effect::Fault(12)
+            }
             8 | 9 => {
                 m.set(rt_i, rs.wrapping_add(simm));
                 Effect::Seq
@@ -822,10 +909,53 @@ impl Interp {
                 m.set(rt_i, imm << 16);
                 Effect::Seq
             }
+            0x22 | 0x26 => {
+                // lwl / lwr, as PCSX-Redux's tables have them.
+                const LWL_MASK: [u32; 4] = [0x00ff_ffff, 0x0000_ffff, 0x0000_00ff, 0];
+                const LWL_SHIFT: [u32; 4] = [24, 16, 8, 0];
+                const LWR_MASK: [u32; 4] = [0, 0xff00_0000, 0xffff_0000, 0xffff_ff00];
+                const LWR_SHIFT: [u32; 4] = [0, 8, 16, 24];
+                let addr = rs.wrapping_add(simm);
+                if watch(m, addr, 1) {
+                    return Effect::Watch;
+                }
+                let sh = usize::try_from(addr & 3).expect("2 bits");
+                let mem = m.read32(addr & !3);
+                let v = if op == 0x22 {
+                    (rt & LWL_MASK[sh]) | (mem << LWL_SHIFT[sh])
+                } else {
+                    (rt & LWR_MASK[sh]) | (mem >> LWR_SHIFT[sh])
+                };
+                m.set(rt_i, v);
+                Effect::Seq
+            }
+            0x2a | 0x2e => {
+                // swl / swr: read-modify-write of the aligned word.
+                const SWL_MASK: [u32; 4] = [0xffff_ff00, 0xffff_0000, 0xff00_0000, 0];
+                const SWL_SHIFT: [u32; 4] = [24, 16, 8, 0];
+                const SWR_MASK: [u32; 4] = [0, 0x0000_00ff, 0x0000_ffff, 0x00ff_ffff];
+                const SWR_SHIFT: [u32; 4] = [0, 8, 16, 24];
+                let addr = rs.wrapping_add(simm);
+                if watch(m, addr, 2) {
+                    return Effect::Watch;
+                }
+                let sh = usize::try_from(addr & 3).expect("2 bits");
+                let mem = m.read32(addr & !3);
+                let v = if op == 0x2a {
+                    (rt >> SWL_SHIFT[sh]) | (mem & SWL_MASK[sh])
+                } else {
+                    (rt << SWR_SHIFT[sh]) | (mem & SWR_MASK[sh])
+                };
+                m.write(addr & !3, &v.to_le_bytes());
+                Effect::Seq
+            }
             0x20 | 0x21 | 0x23 | 0x24 | 0x25 => {
                 let addr = rs.wrapping_add(simm);
                 if watch(m, addr, 1) {
                     return Effect::Watch;
+                }
+                if (op == 0x21 || op == 0x25) && addr & 1 != 0 || op == 0x23 && addr & 3 != 0 {
+                    return Effect::Fault(4); // AdEL
                 }
                 let v = match op {
                     0x20 => i32::from(m.read(addr, 1)[0].cast_signed()).cast_unsigned(),
@@ -845,6 +975,9 @@ impl Interp {
                 if watch(m, addr, 2) {
                     return Effect::Watch;
                 }
+                if op == 0x29 && addr & 1 != 0 || op == 0x2b && addr & 3 != 0 {
+                    return Effect::Fault(5); // AdES
+                }
                 let n = match op {
                     0x28 => 1,
                     0x29 => 2,
@@ -858,6 +991,35 @@ impl Interp {
             }
             _ => Effect::Fault(10),
         }
+    }
+}
+
+impl Interp {
+    /// One step as psxmon's stepper takes it: the instruction at PC and, for
+    /// a branch or jump, its delay slot. Err with what stopped it instead
+    /// (the registers may then be half updated).
+    pub fn host_step(m: &mut Machine) -> Result<(), String> {
+        let pc = m.reg(REG_PC);
+        let insn = m.read32(pc);
+        let next = match Self::exec(m, pc, insn) {
+            Effect::Seq => pc.wrapping_add(4),
+            Effect::Branch(t) => {
+                let slot = pc.wrapping_add(4);
+                match Self::exec(m, slot, m.read32(slot)) {
+                    Effect::Seq => {}
+                    Effect::Branch(_) => return Err("branch in delay slot".into()),
+                    Effect::Break => return Err("break".into()),
+                    Effect::Watch => return Err("watch".into()),
+                    Effect::Fault(c) => return Err(format!("fault {c}")),
+                }
+                t.unwrap_or(pc.wrapping_add(8))
+            }
+            Effect::Break => return Err("break".into()),
+            Effect::Watch => return Err("watch".into()),
+            Effect::Fault(c) => return Err(format!("fault {c}")),
+        };
+        m.set(REG_PC, next);
+        Ok(())
     }
 }
 

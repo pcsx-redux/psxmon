@@ -131,13 +131,24 @@ struct Rig {
 }
 
 /// A sim running `words`, a MonTarget over it halted at the entry, and a
-/// server thread waiting for one gdb connection.
+/// server thread waiting for one gdb connection. Steps are simulated on the
+/// host where possible.
 fn rig(words: &[u32]) -> Rig {
-    rig_with(words, sim::RAM_SIZE)
+    rig_opts(words, sim::RAM_SIZE, true)
 }
 
 /// [`rig`] with `ram` bytes of RAM installed.
 fn rig_with(words: &[u32], ram: usize) -> Rig {
+    rig_opts(words, ram, true)
+}
+
+/// [`rig`], with host step simulation on or off.
+fn rig_sim(words: &[u32], step_sim: bool) -> Rig {
+    rig_opts(words, sim::RAM_SIZE, step_sim)
+}
+
+/// [`rig`] with `ram` bytes of RAM and host step simulation on or off.
+fn rig_opts(words: &[u32], ram: usize, step_sim: bool) -> Rig {
     let cfg = SimConfig {
         rom: rom(),
         ram_size: ram,
@@ -167,6 +178,7 @@ fn rig_with(words: &[u32], ram: usize) -> Rig {
     let pcdrv = PcdrvServer::new(dir.path(), Quota::default()).expect("pcdrv");
     let mut t = MonTarget::new(rt, s, Some(pcdrv));
     t.verbose = std::env::var_os("PSXMON_GDB_VERBOSE").is_some();
+    t.step_sim = step_sim;
     t.start_program(&image(words), &LoadOptions::default())
         .expect("start at entry");
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -415,6 +427,7 @@ fn rsp_registers_memory_breakpoints_steps_pcdrv_exit() {
     assert!(st.errors_sent.is_empty(), "{:x?}", st.errors_sent);
 }
 
+/// Real stepping: the exec breakpoint is lent to a successor in ROM.
 #[test]
 fn rsp_step_into_rom_uses_exec_breakpoint() {
     let words = vec![
@@ -425,7 +438,7 @@ fn rsp_step_into_rom_uses_exec_breakpoint() {
         addiu(A0, ZERO, 0), // 10
         brk(4, 0),
     ];
-    let rig = rig(&words);
+    let rig = rig_sim(&words, false);
     let mut g = Rsp::connect(rig.port);
     g.cmd("qSupported:swbreak+;hwbreak+");
     for _ in 0..3 {
@@ -448,16 +461,122 @@ fn rsp_step_into_rom_uses_exec_breakpoint() {
 
 #[test]
 fn rsp_detach_leaves_target_halted() {
-    let rig = rig(&main_program());
+    for sim in [false, true] {
+        let rig = rig_sim(&main_program(), sim);
+        let mut g = Rsp::connect(rig.port);
+        g.cmd("qSupported:swbreak+");
+        let mark = cmd_count(&rig.stats);
+        assert!(is_trap(&g.cmd("s")));
+        assert_eq!(g.cmd("D"), "OK");
+        let (reason, code) = rig.server.join().expect("server thread");
+        assert!(matches!(reason, DisconnectReason::Disconnect));
+        assert_eq!(code, None);
+        let st = rig.stats.lock().expect("stats");
+        let cmds = &st.cmds[mark..];
+        if sim {
+            // The step (lui t0) ran on the host; detach wrote t0 back.
+            assert!(!cmds.contains(&CONT), "simulated step: {cmds:x?}");
+            assert_eq!(st.cmds.last(), Some(&SET_REG), "t0 written back: {cmds:x?}");
+        } else {
+            assert_eq!(cmds.iter().filter(|&&c| c == CONT).count(), 1, "{cmds:x?}");
+            assert_eq!(st.cmds.last(), Some(&WRITE_MEM), "no CONT after detach");
+        }
+    }
+}
+
+/// A mixed sequence for stepping: ALU, mult/div (by zero too), stores and
+/// loads (byte, lwl/lwr), an I/O load the host leaves to the target, a
+/// taken branch with a load in its delay slot, jal/jr with ALU delay slots.
+fn step_program() -> Vec<u32> {
+    let r = |funct: u32, rs: u32, rt: u32, rd: u32, sa: u32| {
+        (rs << 21) | (rt << 16) | (rd << 11) | (sa << 6) | funct
+    };
+    let mem = |op: u32, rt: u32, off: i32, base: u32| itype(op, base, rt, off);
+    const AT: u32 = 1;
+    const V1: u32 = 3;
+    const A1: u32 = 5;
+    const A2: u32 = 6;
+    const A3: u32 = 7;
+    vec![
+        lui(T0, DATA >> 16),                            // 00
+        addiu(T1, ZERO, -5),                            // 04
+        addiu(T2, ZERO, 7),                             // 08
+        r(0x18, T1, T2, 0, 0),                          // 0c mult
+        r(0x12, 0, 0, T3, 0),                           // 10 mflo
+        r(0x10, 0, 0, T4, 0),                           // 14 mfhi
+        r(0x1a, T2, ZERO, 0, 0),                        // 18 div by zero
+        r(0x12, 0, 0, A0, 0),                           // 1c mflo
+        sw(T1, 0, T0),                                  // 20
+        mem(0x20, T5, 0, T0),                           // 24 lb
+        mem(0x22, A1, 3, T0),                           // 28 lwl
+        mem(0x26, A1, 0, T0),                           // 2c lwr
+        lui(AT, 0x1f80),                                // 30
+        mem(0x23, V0, 0x1070, AT),                      // 34 lw from I/O: on the target
+        beq(ZERO, ZERO, 2),                             // 38 -> 0x44
+        mem(0x23, V1, 0, T0),                           // 3c delay slot load
+        addiu(A0, A0, 100),                             // 40 skipped
+        (3 << 26) | ((BASE + 0x54) >> 2 & 0x03ff_ffff), // 44 jal 0x54
+        r(0x21, V1, T1, A2, 0),                         // 48 addu (slot)
+        r(0x2b, T1, T2, A3, 0),                         // 4c sltu
+        brk(4, 0),                                      // 50 exit
+        r(0x00, 0, A2, A2, 3),                          // 54 sll
+        JR_RA,                                          // 58
+        r(0x02, 0, A2, A3, 1),                          // 5c srl (slot)
+    ]
+}
+
+/// PC after each `s` and the full `g` register dump, and the CONTs sent.
+fn step_trace(sim: bool, steps: usize) -> (Vec<(u32, String)>, usize, usize) {
+    let rig = rig_sim(&step_program(), sim);
     let mut g = Rsp::connect(rig.port);
     g.cmd("qSupported:swbreak+");
-    assert!(is_trap(&g.cmd("s")));
-    assert_eq!(g.cmd("D"), "OK");
-    let (reason, code) = rig.server.join().expect("server thread");
-    assert!(matches!(reason, DisconnectReason::Disconnect));
-    assert_eq!(code, None);
-    let st = rig.stats.lock().expect("stats");
-    assert_eq!(st.cmds.last(), Some(&WRITE_MEM), "no CONT after detach");
+    let mark = cmd_count(&rig.stats);
+    let mut trace = Vec::new();
+    for _ in 0..steps {
+        assert!(is_trap(&g.cmd("s")));
+        trace.push((g.pc(), g.cmd("g")));
+    }
+    let (conts, cmds) = {
+        let st = rig.stats.lock().expect("stats");
+        let cmds = &st.cmds[mark..];
+        let mut kinds: Vec<(u16, usize)> = Vec::new();
+        for &c in cmds {
+            match kinds.iter_mut().find(|k| k.0 == c) {
+                Some(k) => k.1 = k.1.saturating_add(1),
+                None => kinds.push((c, 1)),
+            }
+        }
+        eprintln!("sim={sim}: (command type, count) {kinds:?}");
+        (cmds.iter().filter(|&&c| c == CONT).count(), cmds.len())
+    };
+    // a0 holds div-by-zero's LO: exit code 0xffffffff.
+    assert_eq!(g.cmd("c"), "Wff");
+    let (_, code) = rig.server.join().expect("server thread");
+    assert_eq!(code, Some(u32::MAX));
+    (trace, conts, cmds)
+}
+
+#[test]
+fn rsp_step_simulated_matches_real_step() {
+    const STEPS: usize = 19;
+    let (real, real_conts, real_cmds) = step_trace(false, STEPS);
+    let (sim, sim_conts, sim_cmds) = step_trace(true, STEPS);
+    for (n, (a, b)) in real.iter().zip(sim.iter()).enumerate() {
+        assert_eq!(a, b, "step {n}: real vs simulated");
+    }
+    assert_eq!(
+        real.last().map(|t| t.0),
+        Some(BASE + 0x50),
+        "ends on the exit"
+    );
+    eprintln!(
+        "{STEPS} steps: real {real_conts} CONT / {real_cmds} commands, \
+         simulated {sim_conts} CONT / {sim_cmds} commands"
+    );
+    assert_eq!(real_conts, STEPS);
+    // Only the I/O load runs on the target.
+    assert_eq!(sim_conts, 1);
+    assert!(sim_cmds * 2 < real_cmds, "{sim_cmds} vs {real_cmds}");
 }
 
 /// Stores a word at 0x80200100, 2 MiB above 0x80000100, then exits 42.

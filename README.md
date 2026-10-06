@@ -20,7 +20,8 @@ binary is a thin command line on top of it.
                       [--lz4 | --no-lz4] [--max-match 128] [--pcdrv DIR]
                       [--timeout SECS] [-v]
     psxmon gdb [<file>] --port DEV [--baud 115200] [--fast-reload RELOAD]
-                        [--listen 127.0.0.1:3333] [--no-lz4] [--pcdrv DIR] [-v]
+                        [--listen 127.0.0.1:3333] [--no-lz4] [--pcdrv DIR]
+                        [--real-step] [-v]
     psxmon ping --port DEV [--baud 115200]
     psxmon dump <addr> <len> -o FILE --port DEV
     psxmon write <addr> <file> --port DEV
@@ -210,6 +211,24 @@ Use it with `gdb-multiarch` or any `mips` gdb:
   debug unit, so psxmon re-arms it with SET_BP before every CONT, and turns
   it off after every other stop so the monitor's own memory accesses cannot
   trip it.
+- Single step: the target description says `<osabi>none</osabi>`, so gdb
+  sends `vCont;s` rather than stepping with breakpoints of its own. A step
+  runs the instruction at PC, and for a branch or jump its delay slot too.
+  psxmon simulates most steps on the host (`src/stepsim.rs`): ALU, shift,
+  mult/div and HI/LO instructions, branches and jumps, and aligned loads
+  and stores to RAM (first 2 MiB), scratchpad, and loads from the BIOS,
+  which go through READ_MEM and WRITE_MEM. The registers stay on the host
+  and are written back with SET_REG (only the changed ones) before the
+  target next runs and when gdb detaches. Anything else is stepped on the
+  target: psxmon plants `break 0x3ff, 0` at the successor in RAM, or lends
+  the exec breakpoint to a successor in ROM, continues, and restores
+  everything at the stop. That covers coprocessor instructions, `syscall`
+  and `break`, overflowing `add`/`addi`/`sub`, unaligned accesses, I/O and
+  other memory, a successor PC outside RAM and BIOS, accesses meeting the
+  watch, the ROM breakpoint on a stepped instruction, and SR with IsC, SwC,
+  RE or KUc set. A simulated step takes no interrupt (a stepped wait for a
+  flag an interrupt handler sets never ends; use `continue`).
+  `--real-step` or `PSXMON_STEP_SIM=0` steps everything on the target.
 - Ctrl-C stops a running target at its next interrupt when the monitor
   reports the `stop` capability (`psxmon ping` lists it). A target that has
   interrupts off, or never unmasks one, does not stop; nor does
@@ -223,8 +242,8 @@ Use it with `gdb-multiarch` or any `mips` gdb:
   re-executes the faulting instruction unless the PC is changed.
 - Limits: a `break` in a branch delay slot (a gdb breakpoint there, or a
   program's own) is reported by the monitor as a hardware stop with the PC
-  on the branch (see PROTOCOL.md, section 13). A host step of a branch to
-  itself is reported done without running it. The R3000A has no FPU; gdb's
+  on the branch (see PROTOCOL.md, section 13). With `--real-step`, a step
+  of a branch to itself is reported done without running it. The R3000A has no FPU; gdb's
   FP registers read as 0 and writes to them are dropped.
 
 ## Exit status
