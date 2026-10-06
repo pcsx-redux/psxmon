@@ -271,7 +271,7 @@ submodule. The links fetch the latest release.
 | [`openbios-ft232h-piodev-lite.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-ft232h-piodev-lite.rom) | OpenBIOS with the monitor, 512 KiB BIOS ROM | FT232H, PIO-Dev-Lite | program a replacement BIOS chip | no |
 | [`openbios-ft232h-orion.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-ft232h-orion.rom) | OpenBIOS with the monitor, 512 KiB BIOS ROM | FT232H-style link, Orion cart | program a replacement BIOS chip | no |
 | [`openbios-ft232h-piodev-lite-cart.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-ft232h-piodev-lite-cart.rom) | OpenBIOS with the monitor, cartridge | FT232H, PIO-Dev-Lite | flash the PIO-Dev-Lite; OpenBIOS takes over at boot | no |
-| [`openbios-atcons-h2700.elf`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-atcons-h2700.elf) | OpenBIOS with the monitor, for the DTL-H2700 | ATCONS | `psxmon patch-h2700 stock.bin openbios-atcons-h2700.elf -o flash.bin`, flash, reset mode 7, then `psxmon ... --port atcons` | yes |
+| [`openbios-atcons-h2700.elf`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-atcons-h2700.elf) | OpenBIOS with the monitor, for the DTL-H2700 | ATCONS | `psxmon patch-h2700 stock.bin openbios-atcons-h2700.elf -o flash.bin`, flash, `psxmon h2700-reset --mode 7`, then any subcommand with `--port atcons` | yes |
 
 ## Build
 
