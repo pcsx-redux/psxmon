@@ -62,10 +62,7 @@ impl SerialTransport {
             .timeout(POLL)
             .open()
             .map_err(io::Error::from)?;
-        // The PS1 transmits only while the host holds RTS up (its CTS). A pty
-        // has no modem lines, so a failure here is not fatal.
-        let _ = port.write_request_to_send(true);
-        let _ = port.write_data_terminal_ready(true);
+        raise_modem_lines(&mut port);
         port.clear(serialport::ClearBuffer::All)
             .map_err(io::Error::from)?;
         Self::from_port(port, baud)
@@ -95,6 +92,15 @@ impl SerialTransport {
             .and_then(|q| q.send(c).ok())
             .ok_or_else(closed)
     }
+}
+
+/// The PS1 transmits only while the host holds RTS up (its CTS). A pty has
+/// no modem lines, so a failure here is not fatal. On Windows every
+/// SetCommState, which a rate change goes through, re-applies the DCB's
+/// RTS_CONTROL_DISABLE and drops RTS, so this runs after each one too.
+fn raise_modem_lines(port: &mut Box<dyn SerialPort>) {
+    let _ = port.write_request_to_send(true);
+    let _ = port.write_data_terminal_ready(true);
 }
 
 fn closed() -> io::Error {
@@ -189,7 +195,9 @@ fn io_thread(
                     let _ = done.send(());
                 }
                 Ok(Cmd::SetBaud(baud, done)) => {
-                    let _ = done.send(port.set_baud_rate(baud).map_err(io::Error::from));
+                    let r = port.set_baud_rate(baud).map_err(io::Error::from);
+                    raise_modem_lines(&mut port);
+                    let _ = done.send(r);
                 }
                 Err(std_mpsc::TryRecvError::Empty) => break,
                 Err(std_mpsc::TryRecvError::Disconnected) => return,
