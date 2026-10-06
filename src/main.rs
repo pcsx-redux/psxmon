@@ -12,7 +12,7 @@ use psxmon::gdb::MonTarget;
 use psxmon::pcdrv::{PcdrvServer, Quota};
 use psxmon::proto::{self, CAP_LZ4, CAP_SLOT, CAP_STOP, HELLO, STOP_EXIT};
 use psxmon::session::{LoadOptions, Session, deadline_after};
-use psxmon::transport::parse_tcp_port;
+use psxmon::transport::{self, parse_tcp_port};
 use psxmon::{
     AtconsTransport, SerialTransport, TcpTransport, Transport, atcons, bios, exe, h2700, iso, lz4,
 };
@@ -59,6 +59,12 @@ struct Link {
     /// Seconds to PING for before giving up on the monitor.
     #[arg(long, value_name = "SECS", default_value_t = 5.0)]
     attach_timeout: f64,
+    /// Log to stderr: the rates tried and their outcome, and on a serial
+    /// port every byte each way (hex), the RTS/DTR results at open and after
+    /// each rate change. `run` adds load details and PCDRV calls, `gdb`
+    /// stops, steps and breakpoints.
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(Args)]
@@ -82,9 +88,6 @@ struct RunArgs {
     /// Seconds to let the program run.
     #[arg(long, value_name = "SECS", default_value_t = 60.0)]
     timeout: f64,
-    /// Log load details and PCDRV calls to stderr.
-    #[arg(short, long)]
-    verbose: bool,
 }
 
 #[derive(Args)]
@@ -107,9 +110,6 @@ struct GdbArgs {
     /// Serve PCDRV file I/O from this directory.
     #[arg(long, value_name = "DIR")]
     pcdrv: Option<PathBuf>,
-    /// Log stops, steps, breakpoints and PCDRV calls to stderr.
-    #[arg(short, long)]
-    verbose: bool,
 }
 
 #[derive(Subcommand)]
@@ -210,6 +210,7 @@ const PROBE_WAIT: Duration = Duration::from_secs(1);
 const HELLO_WAIT: Duration = Duration::from_millis(300);
 
 async fn attach(link: &Link) -> Result<MonSession> {
+    transport::set_link_log(link.verbose);
     if let Some(base) = atcons::parse_port(&link.port) {
         return attach_atcons(link, base.map_err(anyhow::Error::msg)?).await;
     }
@@ -379,8 +380,8 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         max_match,
         pcdrv,
         timeout,
-        verbose,
     } = args;
+    let verbose = link.verbose;
     let lz4 = !no_lz4;
     if max_match < 7 {
         bail!("--max-match must be at least 7");
@@ -476,8 +477,8 @@ fn gdb(args: GdbArgs) -> Result<ExitCode> {
         no_lz4,
         max_match,
         pcdrv,
-        verbose,
     } = args;
+    let verbose = link.verbose;
     if max_match < 7 {
         bail!("--max-match must be at least 7");
     }
