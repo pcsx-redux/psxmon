@@ -18,7 +18,7 @@ use crate::lz4::{self, DecodeError};
 use crate::pcdrv::PcdrvServer;
 use crate::proto::{self, *};
 use crate::ram;
-use crate::transport::Transport;
+use crate::transport::{Transport, link_log};
 
 /// Longest PCDRV file name read out of target memory.
 const PCDRV_NAME_MAX: u32 = 256;
@@ -312,9 +312,12 @@ impl<T: Transport> Session<T> {
         let mut wait = first_wait;
         for &rate in rates {
             self.io.set_baud_rate(rate)?;
+            link_log(&format!("PING at {rate} baud for {} ms", wait.as_millis()));
             if self.ping(wait, &[]).await? {
+                link_log(&format!("PONG at {rate} baud"));
                 return Ok(Some(rate));
             }
+            link_log(&format!("no PONG at {rate} baud"));
             wait = other_wait;
         }
         Ok(None)
@@ -584,6 +587,7 @@ impl<T: Transport> Session<T> {
     /// link ends up at.
     pub async fn negotiate_rate(&mut self, reload: u16) -> Result<u32> {
         let old = self.io.baud_rate();
+        link_log(&format!("SET_BAUD reload {reload} from {old} baud"));
         self.send(SET_BAUD, &[reload]).await?;
         match self
             .wait_frame(&[ACK, ERROR], deadline_after(Duration::from_secs(1)))

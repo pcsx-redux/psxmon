@@ -4,16 +4,61 @@
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::task::{Context, Poll};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serialport::SerialPort;
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
+
+static LINK_LOG: AtomicBool = AtomicBool::new(false);
+static LINK_LOG_START: OnceLock<Instant> = OnceLock::new();
+
+/// Log link events to stderr from now on: bytes each way, modem-line
+/// results, line rates (`-v`).
+pub fn set_link_log(on: bool) {
+    LINK_LOG_START.get_or_init(Instant::now);
+    LINK_LOG.store(on, Ordering::Relaxed);
+}
+
+pub fn link_log_on() -> bool {
+    LINK_LOG.load(Ordering::Relaxed)
+}
+
+/// One `-v` link line, stamped with milliseconds since logging started.
+pub fn link_log(msg: &str) {
+    if link_log_on() {
+        let ms = LINK_LOG_START
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_millis();
+        eprintln!("psxmon: link {ms:>6} ms: {msg}");
+    }
+}
+
+/// The most bytes of one read or write shown in hex.
+const LOG_BYTES: usize = 48;
+
+fn log_bytes(dir: &str, data: &[u8]) {
+    if !link_log_on() {
+        return;
+    }
+    let shown = data.get(..LOG_BYTES.min(data.len())).unwrap_or_default();
+    let mut s = String::with_capacity(shown.len().saturating_mul(3));
+    for b in shown {
+        s.push_str(&format!("{b:02x} "));
+    }
+    let rest = data.len().saturating_sub(shown.len());
+    if rest > 0 {
+        s.push_str(&format!("... +{rest}"));
+    }
+    link_log(&format!("{dir} {:>5} B  {}", data.len(), s.trim_end()));
+}
 
 /// An async byte link with a settable line rate.
 pub trait Transport: AsyncRead + AsyncWrite + Unpin + Send {
@@ -62,7 +107,8 @@ impl SerialTransport {
             .timeout(POLL)
             .open()
             .map_err(io::Error::from)?;
-        raise_modem_lines(&mut port);
+        link_log(&format!("opened {path} at {baud} baud"));
+        raise_modem_lines(&mut port, "after open");
         port.clear(serialport::ClearBuffer::All)
             .map_err(io::Error::from)?;
         Self::from_port(port, baud)
@@ -94,13 +140,35 @@ impl SerialTransport {
     }
 }
 
-/// The PS1 transmits only while the host holds RTS up (its CTS). A pty has
-/// no modem lines, so a failure here is not fatal. On Windows every
-/// SetCommState, which a rate change goes through, re-applies the DCB's
-/// RTS_CONTROL_DISABLE and drops RTS, so this runs after each one too.
-fn raise_modem_lines(port: &mut Box<dyn SerialPort>) {
-    let _ = port.write_request_to_send(true);
-    let _ = port.write_data_terminal_ready(true);
+/// The PS1 transmits only while the host holds RTS up (its CTS). On Windows
+/// every SetCommState, which a rate change goes through, re-applies the
+/// DCB's RTS_CONTROL_DISABLE and drops RTS, so this runs after each one too.
+/// `-v` logs both results. A refused RTS is reported without `-v` too,
+/// except where the device has no modem lines at all (a pty: ENOTTY).
+fn raise_modem_lines(port: &mut Box<dyn SerialPort>, when: &str) {
+    let rts = port.write_request_to_send(true);
+    let dtr = port.write_data_terminal_ready(true);
+    let show = |r: &serialport::Result<()>| match r {
+        Ok(()) => "ok".to_string(),
+        Err(e) => format!("failed ({e})"),
+    };
+    link_log(&format!(
+        "{when}: RTS on {}, DTR on {}",
+        show(&rts),
+        show(&dtr)
+    ));
+    if let Err(e) = &rts
+        && !link_log_on()
+        && !no_modem_lines(e)
+    {
+        eprintln!("psxmon: {when}: raising RTS failed ({e}); the PS1 only sends while RTS is up");
+    }
+}
+
+/// The device has no modem lines to set (a pty: ENOTTY, which nix describes
+/// as "Not a typewriter"), as opposed to refusing.
+fn no_modem_lines(e: &serialport::Error) -> bool {
+    e.description.contains("Not a typewriter") || e.description.contains("Inappropriate ioctl")
 }
 
 fn closed() -> io::Error {
@@ -122,9 +190,11 @@ fn deliver(
 ) -> bool {
     match got {
         Ok(0) => false,
-        Ok(n) => tx
-            .send(Ok(buf.get(..n).unwrap_or_default().to_vec()))
-            .is_ok(),
+        Ok(n) => {
+            let got = buf.get(..n).unwrap_or_default();
+            log_bytes("<", got);
+            tx.send(Ok(got.to_vec())).is_ok()
+        }
         Err(e) if transient(&e) => true,
         Err(e) => {
             let _ = tx.send(Err(e));
@@ -163,7 +233,10 @@ fn write_out(
     while !data.is_empty() {
         let take = data.len().min(WRITE_CHUNK);
         match port.write(data.get(..take).unwrap_or_default()) {
-            Ok(n) => data = data.get(n..).unwrap_or_default(),
+            Ok(n) => {
+                log_bytes(">", data.get(..n).unwrap_or_default());
+                data = data.get(n..).unwrap_or_default();
+            }
             Err(e) if transient(&e) => {}
             Err(e) => {
                 let _ = tx.send(Err(e));
@@ -196,7 +269,12 @@ fn io_thread(
                 }
                 Ok(Cmd::SetBaud(baud, done)) => {
                     let r = port.set_baud_rate(baud).map_err(io::Error::from);
-                    raise_modem_lines(&mut port);
+                    link_log(&format!(
+                        "rate {baud}: {}",
+                        r.as_ref()
+                            .map_or_else(|e| format!("failed ({e})"), |()| "set".into())
+                    ));
+                    raise_modem_lines(&mut port, &format!("after rate {baud}"));
                     let _ = done.send(r);
                 }
                 Err(std_mpsc::TryRecvError::Empty) => break,
