@@ -230,11 +230,13 @@ fn write_out(
     buf: &mut [u8],
     tx: &mpsc::UnboundedSender<io::Result<Vec<u8>>>,
 ) -> bool {
-    log_bytes(">", data);
     while !data.is_empty() {
         let take = data.len().min(WRITE_CHUNK);
         match port.write(data.get(..take).unwrap_or_default()) {
-            Ok(n) => data = data.get(n..).unwrap_or_default(),
+            Ok(n) => {
+                log_bytes(">", data.get(..n).unwrap_or_default());
+                data = data.get(n..).unwrap_or_default();
+            }
             Err(e) if transient(&e) => {}
             Err(e) => {
                 let _ = tx.send(Err(e));
