@@ -15,6 +15,7 @@ pub mod pcdrv;
 pub mod proto;
 pub mod ram;
 pub mod session;
+pub mod stepsim;
 pub mod transport;
 
 pub use atcons::AtconsTransport;

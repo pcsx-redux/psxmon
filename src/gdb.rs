@@ -14,9 +14,15 @@
 //! - The one data breakpoint serves Z2/Z3/Z4 (kinds 2/1/3).
 //! - A hardware stop disarms the debug unit, so the session re-arms both
 //!   with SET_BP before every CONT (see `Session::cont`).
-//! - Single step is done here: decode the instruction at PC, plant a
-//!   `break` at the successor in RAM (or use the exec breakpoint for a
-//!   successor in ROM), CONT, and put everything back at the stop.
+//! - Single step is done here. Most steps are simulated on the host
+//!   ([`crate::stepsim`]): the registers are kept here, loads and stores go
+//!   through READ_MEM / WRITE_MEM, and nothing runs. Registers changed that
+//!   way are written back (SET_REG) before the target next runs and when
+//!   gdb goes away. A step the host cannot simulate is done on the target:
+//!   decode the instruction at PC, plant a `break` at the successor in RAM
+//!   (or use the exec breakpoint for a successor in ROM), CONT, and put
+//!   everything back at the stop. [`STEP_SIM_ENV`] set to `0` (or
+//!   `psxmon gdb --real-step`) makes every step a real one.
 //! - PCDRV calls and `break 4, 0` exits are served while the target runs,
 //!   exactly as `psxmon run` does; gdb never sees them, except that an exit
 //!   is reported as the process exiting.
@@ -71,6 +77,7 @@ use crate::proto::*;
 use crate::session::{
     HwBreak, LoadOptions, LoadStats, Session, SessionError, Stop, deadline_after,
 };
+use crate::stepsim::{self, Bus, Guards, Outcome, WatchRange};
 use crate::transport::Transport;
 
 /// How long each wait for a stop lasts before the gdb link is checked.
@@ -85,6 +92,14 @@ const O_CHUNK: usize = 512;
 const O_HELD_MAX: usize = 64 << 10;
 /// Longest wait for gdb's acks of the last packets when closing the link.
 const CLOSE_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Environment variable that turns host-simulated stepping off when `0`.
+pub const STEP_SIM_ENV: &str = "PSXMON_STEP_SIM";
+
+/// Whether [`STEP_SIM_ENV`] leaves step simulation on (the default).
+pub fn step_sim_from_env() -> bool {
+    std::env::var(STEP_SIM_ENV).map_or(true, |v| v.trim() != "0")
+}
 
 /// `break 0x3ff, 0`: the word psxmon plants for a single step and at a
 /// program's entry. Any other `break` is the program's or gdb's.
@@ -141,8 +156,12 @@ pub struct MonTarget<T: Transport> {
     rt: Runtime,
     sess: Session<T>,
     pcdrv: Option<PcdrvServer>,
-    /// Registers of the halted context, read once per stop.
+    /// Registers of the halted context as gdb sees them: read once per
+    /// stop, then changed by simulated steps.
     regs: Option<[u32; NUM_REGS]>,
+    /// What the monitor holds for the halted context; where it differs
+    /// from `regs`, SET_REG is owed before the target runs.
+    target_regs: [u32; NUM_REGS],
     /// gdb's hardware breakpoint (ROM only).
     rom_bp: Option<u32>,
     watch: Option<Watch>,
@@ -157,6 +176,34 @@ pub struct MonTarget<T: Transport> {
     gdb_text: Arc<Mutex<Vec<u8>>>,
     /// `O` packets sent since the last resume whose `+` gdbstub has not read.
     acks_owed: usize,
+    /// Simulate steps on the host where possible (see [`crate::stepsim`]).
+    pub step_sim: bool,
+    /// Steps simulated and steps run on the target, for logs and tests.
+    pub steps_simulated: u64,
+    pub steps_real: u64,
+}
+
+/// The monitor's memory, for [`stepsim`].
+struct MonBus<'a, T: Transport> {
+    rt: &'a Runtime,
+    sess: &'a mut Session<T>,
+}
+
+impl<T: Transport> Bus for MonBus<'_, T> {
+    type Error = SessionError;
+
+    fn read(&mut self, addr: u32, len: u32) -> Res<Vec<u8>> {
+        let b = self.rt.block_on(self.sess.read_mem(addr, len))?;
+        let n = usize::try_from(len).map_err(|_| SessionError::TooLarge("read"))?;
+        match b.get(..n) {
+            Some(s) => Ok(s.to_vec()),
+            None => Err(SessionError::Other("short READ_MEM".into())),
+        }
+    }
+
+    fn write(&mut self, addr: u32, data: &[u8]) -> Res<()> {
+        self.rt.block_on(self.sess.write_mem(addr, data))
+    }
 }
 
 impl<T: Transport> MonTarget<T> {
@@ -180,6 +227,7 @@ impl<T: Transport> MonTarget<T> {
             sess,
             pcdrv,
             regs: None,
+            target_regs: [0; NUM_REGS],
             rom_bp: None,
             watch: None,
             pending: Pending::Halted,
@@ -188,6 +236,9 @@ impl<T: Transport> MonTarget<T> {
             verbose: false,
             gdb_text,
             acks_owed: 0,
+            step_sim: step_sim_from_env(),
+            steps_simulated: 0,
+            steps_real: 0,
         }
     }
 
@@ -275,8 +326,21 @@ impl<T: Transport> MonTarget<T> {
             let last = usize::from(!matches!(r, Ok(DisconnectReason::Kill)));
             close_gently(&sock, self.acks_owed.saturating_add(last));
         }
+        // Registers a simulated step changed go back to the monitor, so the
+        // halted context is the one gdb last saw.
+        let flushed = if self.exit_code.is_none() {
+            self.flush_regs()
+        } else {
+            Ok(())
+        };
+        self.log(|| {
+            format!(
+                "steps: {} simulated, {} on the target",
+                self.steps_simulated, self.steps_real
+            )
+        });
         match r {
-            Ok(reason) => Ok(reason),
+            Ok(reason) => flushed.map(|()| reason),
             Err(e) => {
                 if let Some(code) = self.exit_code {
                     // gdb may drop the link right after W.
@@ -294,14 +358,36 @@ impl<T: Transport> MonTarget<T> {
         }
         let r = self.rt.block_on(self.sess.get_regs())?;
         self.regs = Some(r);
+        self.target_regs = r;
         Ok(r)
+    }
+
+    /// SET_REG every register a simulated step changed.
+    fn flush_regs(&mut self) -> Res<()> {
+        let Some(regs) = self.regs else {
+            return Ok(());
+        };
+        for (i, &v) in regs.iter().enumerate().skip(1) {
+            if self.target_regs.get(i) != Some(&v) {
+                let idx = u16::try_from(i).map_err(|_| SessionError::TooLarge("register index"))?;
+                self.rt.block_on(self.sess.set_reg(idx, v))?;
+                if let Some(slot) = self.target_regs.get_mut(i) {
+                    *slot = v;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn set_reg(&mut self, index: usize, value: u32) -> Res<()> {
         let idx = u16::try_from(index).map_err(|_| SessionError::TooLarge("register index"))?;
         self.rt.block_on(self.sess.set_reg(idx, value))?;
+        let value = if index == 0 { 0 } else { value };
         if let Some(slot) = self.regs.as_mut().and_then(|r| r.get_mut(index)) {
-            *slot = if index == 0 { 0 } else { value };
+            *slot = value;
+        }
+        if let Some(slot) = self.target_regs.get_mut(index) {
+            *slot = value;
         }
         Ok(())
     }
@@ -331,6 +417,7 @@ impl<T: Transport> MonTarget<T> {
 
     fn do_continue(&mut self) -> Res<()> {
         self.acks_owed = 0;
+        self.flush_regs()?;
         self.sync_hw();
         self.regs = None;
         self.rt.block_on(self.sess.cont())?;
@@ -338,9 +425,64 @@ impl<T: Transport> MonTarget<T> {
         Ok(())
     }
 
+    /// What a simulated step must not run past: gdb's ROM breakpoint and
+    /// its watch.
+    fn guards(&self) -> Guards {
+        Guards {
+            exec: self.rom_bp.map(|a| (a, SEGMENT_MASK)),
+            watch: self.watch.map(|w| WatchRange {
+                addr: w.addr,
+                len: w.len,
+                read: matches!(w.kind, WatchKind::Read | WatchKind::ReadWrite),
+                write: matches!(w.kind, WatchKind::Write | WatchKind::ReadWrite),
+            }),
+        }
+    }
+
+    /// Step on the host; false (nothing changed) when it has to be real.
+    fn sim_step(&mut self, regs: [u32; NUM_REGS]) -> Res<bool> {
+        let pc = regs.get(usize::from(REG_PC)).copied().unwrap_or(0);
+        // With no halted context there is nothing to step (and nothing
+        // SET_REG could write back).
+        let ctx = regs
+            .iter()
+            .enumerate()
+            .any(|(i, &v)| i != usize::from(REG_BADVADDR) && v != 0);
+        if !ctx {
+            return Ok(false);
+        }
+        let guards = self.guards();
+        let mut new = regs;
+        let mut bus = MonBus {
+            rt: &self.rt,
+            sess: &mut self.sess,
+        };
+        match stepsim::step(&mut new, &guards, &mut bus)? {
+            Outcome::Done => {
+                self.regs = Some(new);
+                self.steps_simulated = self.steps_simulated.saturating_add(1);
+                self.log(|| {
+                    let to = new.get(usize::from(REG_PC)).copied().unwrap_or(0);
+                    format!("step at 0x{pc:08x}: simulated -> 0x{to:08x}")
+                });
+                Ok(true)
+            }
+            Outcome::Fallback(why) => {
+                self.log(|| format!("step at 0x{pc:08x}: on the target ({why})"));
+                Ok(false)
+            }
+        }
+    }
+
     fn do_step(&mut self) -> Res<()> {
         self.acks_owed = 0;
         let regs = self.regs()?;
+        if self.step_sim && self.sim_step(regs)? {
+            self.pending = Pending::Report(SingleThreadStopReason::DoneStep);
+            return Ok(());
+        }
+        self.flush_regs()?;
+        self.steps_real = self.steps_real.saturating_add(1);
         let pc = regs.get(usize::from(REG_PC)).copied().unwrap_or(0);
         let insn = self.read_word(pc)?;
         let next = mips::next_pc(pc, insn, &regs).addrs();
