@@ -31,6 +31,11 @@ const RATE_WINDOW: Duration = Duration::from_millis(2500);
 
 const SHORT: Duration = Duration::from_secs(2);
 const BULK: Duration = Duration::from_secs(5);
+/// Bulk frames in flight when the monitor has [`CAP_PIPELINE`]: frames go out
+/// ahead of their ACKs, so an ACK's trip back (an FTDI's 16 ms latency timer)
+/// overlaps the next transfers instead of idling the link. 4 x 8 KiB covers
+/// that timer at FT232H rates; 1 (no pipelining) otherwise.
+const PIPELINE: usize = 4;
 
 /// `now + d`, or far in the future if that does not fit.
 pub fn deadline_after(d: Duration) -> Instant {
@@ -334,19 +339,37 @@ impl<T: Transport> Session<T> {
         self.bulk_write(WRITE_MEM, "WRITE_MEM", addr, data).await
     }
 
+    fn pipeline_depth(&self) -> usize {
+        if self.caps & CAP_PIPELINE != 0 {
+            PIPELINE
+        } else {
+            1
+        }
+    }
+
     async fn bulk_write(&mut self, ty: u16, name: &str, addr: u32, data: &[u8]) -> Result<()> {
         u32_len(data.len(), "write length")?;
         let mut at = addr;
+        let mut pending = VecDeque::new();
         for chunk in data.chunks(CHUNK_BYTES) {
             let n = u32_len(chunk.len(), "chunk")?;
             let mut payload = u32_words(&[at, n]);
             payload.extend(bytes_to_words(chunk));
             self.send(ty, &payload).await?;
-            self.expect_ack(|| format!("{name} at 0x{at:08x}"), BULK)
-                .await?;
+            pending.push_back(at);
+            if pending.len() >= self.pipeline_depth()
+                && let Some(a) = pending.pop_front()
+            {
+                self.expect_ack(|| format!("{name} at 0x{a:08x}"), BULK)
+                    .await?;
+            }
             // Target addresses are 32-bit and wrap, as `addr + off` does
             // once the reference host packs it into two words.
             at = at.wrapping_add(n);
+        }
+        while let Some(a) = pending.pop_front() {
+            self.expect_ack(|| format!("{name} at 0x{a:08x}"), BULK)
+                .await?;
         }
         Ok(())
     }
@@ -357,15 +380,25 @@ impl<T: Transport> Session<T> {
         let raw_len = u32_len(raw_len, "LZ4 raw length")?;
         let clen = u32_len(comp.len(), "LZ4 block")?;
         let mut off: u32 = 0;
+        let mut pending = VecDeque::new();
         for chunk in comp.chunks(CHUNK_BYTES) {
             let n = u32_len(chunk.len(), "chunk")?;
             let mut payload = u32_words(&[addr, raw_len, clen, off, n]);
             payload.extend(bytes_to_words(chunk));
             self.send(LOAD | LZ4_FLAG, &payload).await?;
-            self.expect_ack(|| format!("LZ4 LOAD at offset {off}"), BULK)
-                .await?;
+            pending.push_back(off);
+            if pending.len() >= self.pipeline_depth()
+                && let Some(o) = pending.pop_front()
+            {
+                self.expect_ack(|| format!("LZ4 LOAD at offset {o}"), BULK)
+                    .await?;
+            }
             // off + n <= clen, a u32.
             off = off.saturating_add(n);
+        }
+        while let Some(o) = pending.pop_front() {
+            self.expect_ack(|| format!("LZ4 LOAD at offset {o}"), BULK)
+                .await?;
         }
         Ok(())
     }
