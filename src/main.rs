@@ -14,7 +14,7 @@ use psxmon::console::ConsoleLines;
 use psxmon::crash::{self, Symbols};
 use psxmon::gdb::MonTarget;
 use psxmon::pcdrv::{NetPolicy, PcdrvServer, Quota, parse_net_target};
-use psxmon::proto::{self, CAP_LZ4, CAP_SLOT, CAP_STOP, HELLO, STOP_EXIT, STOP_FAULT};
+use psxmon::proto::{self, CAP_LZ4, CAP_SLOT, CAP_STOP, CAP_WATCHDOG, HELLO, STOP_EXIT, STOP_FAULT};
 use psxmon::rate::RateMeter;
 use psxmon::session::{LoadOptions, Session, deadline_after};
 use psxmon::transport::{self, parse_tcp_port};
@@ -110,6 +110,10 @@ struct RunArgs {
     /// when it is an ELF).
     #[arg(long, value_name = "FILE")]
     elf: Option<PathBuf>,
+    /// Send RUN's features word: bit 0 keeps a board watchdog kicked while
+    /// the program runs. Without it the monitor uses its default (kicked).
+    #[arg(long, value_name = "N")]
+    features: Option<u16>,
 }
 
 #[derive(Args)]
@@ -396,6 +400,9 @@ fn describe_caps(caps: u16) -> String {
     if caps & CAP_SLOT != 0 {
         names.push("slot");
     }
+    if caps & CAP_WATCHDOG != 0 {
+        names.push("watchdog");
+    }
     format!(
         "0x{caps:04x} ({})",
         if names.is_empty() {
@@ -485,6 +492,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         timeout,
         detach,
         elf,
+        features,
     } = args;
     // --timeout 0 is the fire-and-forget case, the same as --detach.
     let detach = detaches(detach, timeout);
@@ -576,7 +584,8 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     }
     s.set_console(Some(stdout_console()));
     let limit = timeout.map(|t| seconds(t, "--timeout")).transpose()?;
-    s.run(image.pc, image.gp, image.sp).await?;
+    s.run_with_features(image.pc, image.gp, image.sp, features)
+        .await?;
     if detach {
         if let Some(sv) = server.as_mut() {
             sv.close_all();

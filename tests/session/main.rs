@@ -243,6 +243,19 @@ async fn pcdrv_farmjob_small_and_exact_chunk() {
 }
 
 #[tokio::test]
+async fn run_features_word_only_when_asked() {
+    for features in [None, Some(0), Some(FEAT_WATCHDOG)] {
+        let (mut s, stats) = attach(SimConfig::default(), Box::new(Farmjob::new())).await;
+        s.run_with_features(0x8001_0000, 0, 0x801f_fff0, features)
+            .await
+            .expect("RUN");
+        let mut want = vec![0x0000, 0x8001, 0x0000, 0x0000, 0xfff0, 0x801f];
+        want.extend(features);
+        assert_eq!(lock(&stats).runs, vec![want]);
+    }
+}
+
+#[tokio::test]
 async fn pcdrv_without_server_fails_calls() {
     let (mut s, _) = attach(SimConfig::default(), Box::new(Farmjob::new())).await;
     s.run(0x8001_0000, 0, 0x801f_fff0).await.expect("RUN");

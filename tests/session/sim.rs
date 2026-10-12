@@ -232,6 +232,8 @@ pub struct SimStats {
     pub cmds: Vec<u16>,
     /// SET_BP payloads: (kind, addr, mask).
     pub set_bps: Vec<(u16, u32, u32)>,
+    /// RUN payloads, in order.
+    pub runs: Vec<Vec<u16>>,
 }
 
 #[derive(Default)]
@@ -497,6 +499,7 @@ impl Sim {
                 self.send_status(code).await;
             }
             RUN => {
+                self.stats().runs.push(w.to_vec());
                 self.m.regs = [0; NUM_REGS];
                 self.m.set(GP, word_u32(w, 2));
                 self.m.set(SP, word_u32(w, 4));

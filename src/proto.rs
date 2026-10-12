@@ -59,6 +59,15 @@ pub const CAP_SLOT: u16 = 0x0004;
 /// their ACKs (FT232H; never SIO1, whose FIFO overruns).
 pub const CAP_PIPELINE: u16 = 0x0008;
 
+/// Capability bit: the board has a watchdog the monitor kicks, and RUN's
+/// optional features word decides whether it keeps kicking while the target
+/// runs.
+pub const CAP_WATCHDOG: u16 = 0x0010;
+
+/// RUN features word, bit 0: keep the watchdog kicked while the target runs.
+/// A RUN without the word gets it set.
+pub const FEAT_WATCHDOG: u16 = 0x0001;
+
 // ERROR codes.
 pub const E_BADCMD: u16 = 0x01;
 pub const E_BADSTATE: u16 = 0x02;
