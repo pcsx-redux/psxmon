@@ -85,9 +85,10 @@ struct RunArgs {
     /// Serve PCDRV file I/O from this directory.
     #[arg(long, value_name = "DIR")]
     pcdrv: Option<PathBuf>,
-    /// Seconds to let the program run.
-    #[arg(long, value_name = "SECS", default_value_t = 60.0)]
-    timeout: f64,
+    /// Seconds to let the program run. Without it, run until the program
+    /// exits or stops, or psxmon is interrupted.
+    #[arg(long, value_name = "SECS")]
+    timeout: Option<f64>,
 }
 
 #[derive(Args)]
@@ -207,6 +208,9 @@ fn parse_u32(s: &str) -> std::result::Result<u32, String> {
 fn seconds(secs: f64, what: &str) -> Result<Duration> {
     Duration::try_from_secs_f64(secs).with_context(|| format!("{what}: bad number of seconds"))
 }
+
+/// With no --timeout, `run` waits for the stop in slices of this length.
+const FOREVER_SLICE: Duration = Duration::from_secs(3600);
 
 /// How long to PING at each rate other than --baud before trying the next.
 const PROBE_WAIT: Duration = Duration::from_secs(1);
@@ -437,9 +441,15 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         let _ = out.write_all(bytes);
         let _ = out.flush();
     })));
-    let deadline = deadline_after(seconds(timeout, "--timeout")?);
+    let limit = timeout.map(|t| seconds(t, "--timeout")).transpose()?;
     s.run(image.pc, image.gp, image.sp).await?;
-    let result = s.run_until_stop(deadline, server.as_mut()).await?;
+    let result = loop {
+        let deadline = deadline_after(limit.unwrap_or(FOREVER_SLICE));
+        let r = s.run_until_stop(deadline, server.as_mut()).await?;
+        if r.stop.is_some() || limit.is_some() {
+            break r;
+        }
+    };
     if let Some(sv) = server.as_mut() {
         sv.close_all();
     }
@@ -460,7 +470,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
             ExitCode::from(EXIT_STOPPED)
         }
         (None, None) => {
-            eprintln!("psxmon: timed out after {timeout} s");
+            eprintln!("psxmon: timed out after {} s", timeout.unwrap_or_default());
             ExitCode::from(EXIT_TIMEOUT)
         }
     })

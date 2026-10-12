@@ -250,7 +250,8 @@ Use it with `gdb-multiarch` or any `mips` gdb:
 
 `psxmon run` prints the target's full exit code on stderr. The process exit
 status is that code when it is between 0 and 123, and 123 for any larger
-code. Other statuses: 124 means the target did not stop before `--timeout`,
+code. Other statuses: 124 means the target did not stop before `--timeout`
+(`run` has no timeout unless one is given),
 125 means a host, link or protocol error, and 126 means the target stopped
 without exiting (a fault or another breakpoint).
 
