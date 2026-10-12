@@ -1,6 +1,6 @@
 //! psxmon: command-line host for the PS1 debug monitor.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant as StdInstant};
@@ -410,9 +410,25 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         max_match,
         ..Default::default()
     };
+    // A progress line only where someone watches it, and not under -v,
+    // whose own lines would break it up.
+    let show_progress = std::io::stderr().is_terminal() && !verbose;
     let t0 = StdInstant::now();
-    for seg in &image.segments {
-        let st = s.load(seg.addr, &seg.data, &opts).await?;
+    let nsegs = image.segments.len();
+    for (i, seg) in image.segments.iter().enumerate() {
+        if show_progress {
+            let what = if nsegs > 1 {
+                format!("0x{:08x} ({}/{nsegs})", seg.addr, i.saturating_add(1))
+            } else {
+                format!("0x{:08x}", seg.addr)
+            };
+            s.progress = Some(progress_line(what));
+        }
+        let st = s.load(seg.addr, &seg.data, &opts).await;
+        if s.progress.take().is_some() {
+            eprint!("\r\x1b[K");
+        }
+        let st = st?;
         if verbose {
             let how = st
                 .lz4_bytes
@@ -436,11 +452,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
             image.sp
         );
     }
-    s.set_console(Some(Box::new(|bytes: &[u8]| {
-        let mut out = std::io::stdout().lock();
-        let _ = out.write_all(bytes);
-        let _ = out.flush();
-    })));
+    s.set_console(Some(stdout_console()));
     let limit = timeout.map(|t| seconds(t, "--timeout")).transpose()?;
     s.run(image.pc, image.gp, image.sp).await?;
     let result = loop {
@@ -476,11 +488,45 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     })
 }
 
+/// What goes in front of each line of the target's console text on a
+/// terminal, to tell it from psxmon's own messages.
+const TTY_PREFIX: &[u8] = b"PSX> ";
+
+/// The target's console text to stdout: raw when stdout is piped, so logs
+/// and expected-output files see exactly the target's bytes, and with
+/// [`TTY_PREFIX`] on each line when it is a terminal.
 fn stdout_console() -> psxmon::session::Console {
-    Box::new(|bytes: &[u8]| {
+    let mut line_start = std::io::stdout().is_terminal().then_some(true);
+    Box::new(move |bytes: &[u8]| {
         let mut out = std::io::stdout().lock();
-        let _ = out.write_all(bytes);
+        let _ = match line_start.as_mut() {
+            Some(at) => out.write_all(&prefix_lines(bytes, at)),
+            None => out.write_all(bytes),
+        };
         let _ = out.flush();
+    })
+}
+
+/// `bytes` with [`TTY_PREFIX`] before each line start; `at_start` carries
+/// whether the next byte begins a line from one call to the next.
+fn prefix_lines(bytes: &[u8], at_start: &mut bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(bytes.len().saturating_add(TTY_PREFIX.len()));
+    for &b in bytes {
+        if *at_start {
+            v.extend_from_slice(TTY_PREFIX);
+        }
+        v.push(b);
+        *at_start = b == b'\n';
+    }
+    v
+}
+
+/// A progress callback that redraws one stderr line for the upload of
+/// `what`.
+fn progress_line(what: String) -> psxmon::session::Progress {
+    Box::new(move |sent: usize, total: usize| {
+        let pct = sent.saturating_mul(100).checked_div(total).unwrap_or(100);
+        eprint!("\r\x1b[Kpsxmon: uploading {what}: {pct}% of {total} bytes");
     })
 }
 
@@ -697,5 +743,17 @@ mod tests {
         assert_eq!(parse_u32("0x8001_0000"), Ok(0x8001_0000));
         assert_eq!(parse_u32("4096"), Ok(4096));
         assert!(parse_u32("0x1_0000_0000").is_err());
+    }
+
+    #[test]
+    fn prefix_lines_marks_each_line_start_across_calls() {
+        let mut at = true;
+        assert_eq!(prefix_lines(b"a\nb", &mut at), b"PSX> a\nPSX> b");
+        assert!(!at);
+        assert_eq!(prefix_lines(b"c\n", &mut at), b"c\n");
+        assert!(at);
+        assert_eq!(prefix_lines(b"\n\n", &mut at), b"PSX> \nPSX> \n");
+        assert_eq!(prefix_lines(b"", &mut at), b"");
+        assert!(at);
     }
 }

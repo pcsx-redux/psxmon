@@ -136,6 +136,10 @@ pub struct LoadStats {
 
 pub type Console = Box<dyn FnMut(&[u8]) + Send>;
 
+/// Called after each ACKed slice of a program upload with the bytes sent so
+/// far and the total, both counted on the wire (compressed for LZ4).
+pub type Progress = Box<dyn FnMut(usize, usize) + Send>;
+
 /// One cop0 debug-unit breakpoint, as SET_BP takes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HwBreak {
@@ -165,8 +169,10 @@ pub struct Session<T: Transport> {
     pub caps: u16,
     /// BIOS Fletcher-32 from the last full PONG (protocol v2).
     pub bios: Option<u32>,
-    /// Log PCDRV calls to stderr.
+    /// Log every PCDRV call to stderr, not only opens, closes and errors.
     pub verbose: bool,
+    /// Upload progress for [`Session::load`].
+    pub progress: Option<Progress>,
     /// Debug-unit breakpoints armed with SET_BP before every CONT. A
     /// hardware stop disarms the whole unit (PROTOCOL.md section 11), so
     /// they are re-sent each time.
@@ -189,6 +195,7 @@ impl<T: Transport> Session<T> {
             caps: 0,
             bios: None,
             verbose: false,
+            progress: None,
             hw: HwBreaks::default(),
             hw_live: false,
             ram_size: None,
@@ -337,6 +344,7 @@ impl<T: Transport> Session<T> {
     async fn bulk_write(&mut self, ty: u16, name: &str, addr: u32, data: &[u8]) -> Result<()> {
         u32_len(data.len(), "write length")?;
         let mut at = addr;
+        let mut sent: usize = 0;
         for chunk in data.chunks(CHUNK_BYTES) {
             let n = u32_len(chunk.len(), "chunk")?;
             let mut payload = u32_words(&[at, n]);
@@ -344,6 +352,12 @@ impl<T: Transport> Session<T> {
             self.send(ty, &payload).await?;
             self.expect_ack(|| format!("{name} at 0x{at:08x}"), BULK)
                 .await?;
+            sent = sent.saturating_add(chunk.len());
+            if ty == LOAD
+                && let Some(p) = self.progress.as_mut()
+            {
+                p(sent, data.len());
+            }
             // Target addresses are 32-bit and wrap, as `addr + off` does
             // once the reference host packs it into two words.
             at = at.wrapping_add(n);
@@ -364,6 +378,9 @@ impl<T: Transport> Session<T> {
             self.send(LOAD | LZ4_FLAG, &payload).await?;
             self.expect_ack(|| format!("LZ4 LOAD at offset {off}"), BULK)
                 .await?;
+            if let Some(p) = self.progress.as_mut() {
+                p(to_usize(off.saturating_add(n))?, comp.len());
+            }
             // off + n <= clen, a u32.
             off = off.saturating_add(n);
         }
@@ -695,9 +712,7 @@ impl<T: Transport> Session<T> {
             Some(server) => match self.pcdrv_call(server, op, [a0, a1, a2, a3]).await {
                 Ok(v) => v,
                 Err(e) => {
-                    if self.verbose {
-                        eprintln!("psxmon: pcdrv 0x{op:03x} failed: {e}");
-                    }
+                    eprintln!("psxmon: pcdrv: {} failed: {e}", pcdrv_op_name(op));
                     -1
                 }
             },
@@ -732,13 +747,29 @@ impl<T: Transport> Session<T> {
             PC_CREAT | PC_OPEN => {
                 let raw = self.read_mem(a0, PCDRV_NAME_MAX).await?;
                 let name = raw.split(|&b| b == 0).next().unwrap_or_default();
-                if op == PC_CREAT {
-                    s.create(name)?
+                let shown = String::from_utf8_lossy(name);
+                let what = pcdrv_op_name(op);
+                let r = if op == PC_CREAT {
+                    s.create(name)
                 } else {
-                    s.open(name, a2)?
+                    s.open(name, a2)
+                };
+                match r {
+                    Ok(fd) => {
+                        eprintln!("psxmon: pcdrv: {what} {shown} -> {fd}");
+                        fd
+                    }
+                    Err(e) => {
+                        eprintln!("psxmon: pcdrv: {what} {shown} failed: {e}");
+                        -1
+                    }
                 }
             }
-            PC_CLOSE => s.close(a0.cast_signed()),
+            PC_CLOSE => {
+                let fd = a0.cast_signed();
+                eprintln!("psxmon: pcdrv: close {fd}");
+                s.close(fd)
+            }
             PC_READ => {
                 let data = s.read(a1.cast_signed(), a2)?;
                 if !data.is_empty() {
@@ -762,6 +793,19 @@ impl<T: Transport> Session<T> {
             PC_LSEEK => s.seek(a0.cast_signed(), a2.cast_signed(), a3)?,
             _ => -1,
         })
+    }
+}
+
+fn pcdrv_op_name(op: u32) -> &'static str {
+    match op {
+        PC_INIT => "init",
+        PC_CREAT => "create",
+        PC_OPEN => "open",
+        PC_CLOSE => "close",
+        PC_READ => "read",
+        PC_WRITE => "write",
+        PC_LSEEK => "seek",
+        _ => "unknown call",
     }
 }
 

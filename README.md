@@ -41,10 +41,13 @@ Addresses and lengths take decimal
 or `0x` hex.
 
 - `run` loads a program, starts it, and copies its console text to stdout.
-  It serves `break 0, 0x101..0x107` PCDRV calls from `--pcdrv DIR`, jailed
-  to that directory. Without `--pcdrv`, every PCDRV call fails with -1. The
-  run ends when the program executes `break 4, 0`, with its exit code in
-  `a0`.
+  On a terminal each line of that text starts with `PSX> `; piped, it is
+  the target's bytes unchanged. psxmon's own messages go to stderr: an
+  upload progress line when stderr is a terminal, and one line per PCDRV
+  open, close or failed call. It serves `break 0, 0x101..0x107` PCDRV calls
+  from `--pcdrv DIR`, jailed to that directory. Without `--pcdrv`, every
+  PCDRV call fails with -1. The run ends when the program executes
+  `break 4, 0`, with its exit code in `a0`.
 - Programs can be PS-EXE, ELF, CPE or PSF, told apart by their magic. An ELF
   loads its PT_LOAD segments at their physical addresses, minus the header
   sections, and starts at `e_entry` with gp from `_gp`. A CPE loads its load

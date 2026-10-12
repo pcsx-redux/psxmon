@@ -145,6 +145,58 @@ async fn lz4_falls_back_to_plain_without_cap() {
     assert_eq!(lock(&stats).plain_load_frames, 3);
 }
 
+/// Run a load with a progress callback and return what it reported.
+async fn load_progress(caps: u16, data: &[u8]) -> (Vec<(usize, usize)>, Option<usize>) {
+    let cfg = SimConfig {
+        caps,
+        ..Default::default()
+    };
+    let (mut s, _stats) = attach(cfg, Box::new(Hang)).await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    s.progress = Some(Box::new(move |sent, total| {
+        log.lock().expect("progress log").push((sent, total));
+    }));
+    let st = s
+        .load(0x8001_0000, data, &LoadOptions::default())
+        .await
+        .expect("load");
+    let v = seen.lock().expect("progress log").clone();
+    (v, st.lz4_bytes)
+}
+
+#[tokio::test]
+async fn progress_counts_plain_chunks_to_the_total() {
+    let (v, lz4) = load_progress(0, &program_text(20000)).await;
+    assert_eq!(lz4, None);
+    assert_eq!(v, [(8192, 20000), (16384, 20000), (20000, 20000)]);
+}
+
+#[tokio::test]
+async fn progress_counts_lz4_bytes_on_the_wire() {
+    let (v, lz4) = load_progress(CAP_LZ4, &program_text(100_000)).await;
+    let comp = lz4.expect("sent as LZ4");
+    assert!(v.len() > 1, "{v:?}");
+    assert!(v.iter().all(|&(_, total)| total == comp), "{v:?}");
+    assert!(v.windows(2).all(|w| w[0].0 < w[1].0), "{v:?}");
+    assert_eq!(v.last(), Some(&(comp, comp)));
+}
+
+#[tokio::test]
+async fn progress_is_silent_for_write_mem() {
+    let cfg = SimConfig::default();
+    let (mut s, _stats) = attach(cfg, Box::new(Hang)).await;
+    let calls = Arc::new(Mutex::new(0u32));
+    let log = Arc::clone(&calls);
+    s.progress = Some(Box::new(move |_, _| {
+        *log.lock().expect("calls") += 1;
+    }));
+    s.write_mem(0x8001_0000, &[1u8; 20000])
+        .await
+        .expect("write");
+    assert_eq!(*calls.lock().expect("calls"), 0);
+}
+
 async fn farmjob(lz4: bool, size: usize) {
     let dir = tempfile::tempdir().expect("tempdir");
     let input: Vec<u8> = b"abcdefghijklmnopqrstuvwxyz\n"
