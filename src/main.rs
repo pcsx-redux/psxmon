@@ -11,7 +11,7 @@ use clap::{Args, Parser, Subcommand};
 use gdbstub::stub::DisconnectReason;
 use psxmon::gdb::MonTarget;
 use psxmon::pcdrv::{NetPolicy, PcdrvServer, Quota, parse_net_target};
-use psxmon::proto::{self, CAP_LZ4, CAP_SLOT, CAP_STOP, HELLO, STOP_EXIT};
+use psxmon::proto::{self, CAP_LZ4, CAP_SLOT, CAP_STOP, CAP_WATCHDOG, HELLO, STOP_EXIT};
 use psxmon::session::{LoadOptions, Session, deadline_after};
 use psxmon::transport::{self, parse_tcp_port};
 use psxmon::{
@@ -97,6 +97,10 @@ struct RunArgs {
     /// exits or stops, or psxmon is interrupted.
     #[arg(long, value_name = "SECS")]
     timeout: Option<f64>,
+    /// Send RUN's features word: bit 0 keeps a board watchdog kicked while
+    /// the program runs. Without it the monitor uses its default (kicked).
+    #[arg(long, value_name = "N")]
+    features: Option<u16>,
 }
 
 #[derive(Args)]
@@ -377,6 +381,9 @@ fn describe_caps(caps: u16) -> String {
     if caps & CAP_SLOT != 0 {
         names.push("slot");
     }
+    if caps & CAP_WATCHDOG != 0 {
+        names.push("watchdog");
+    }
     format!(
         "0x{caps:04x} ({})",
         if names.is_empty() {
@@ -464,6 +471,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         pcdrv_net,
         pcdrv_net_allow,
         timeout,
+        features,
     } = args;
     let verbose = link.verbose;
     let lz4 = !no_lz4;
@@ -523,7 +531,8 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     }
     s.set_console(Some(stdout_console()));
     let limit = timeout.map(|t| seconds(t, "--timeout")).transpose()?;
-    s.run(image.pc, image.gp, image.sp).await?;
+    s.run_with_features(image.pc, image.gp, image.sp, features)
+        .await?;
     let result = loop {
         let deadline = deadline_after(limit.unwrap_or(FOREVER_SLICE));
         let r = s.run_until_stop(deadline, server.as_mut()).await?;

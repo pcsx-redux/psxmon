@@ -707,7 +707,21 @@ impl<T: Transport> Session<T> {
     }
 
     pub async fn run(&mut self, pc: u32, gp: u32, sp: u32) -> Result<()> {
-        self.send(RUN, &u32_words(&[pc, gp, sp])).await?;
+        self.run_with_features(pc, gp, sp, None).await
+    }
+
+    /// RUN, with the optional features word ([`proto::FEAT_WATCHDOG`]) when
+    /// `features` is set. Without it the monitor uses its default.
+    pub async fn run_with_features(
+        &mut self,
+        pc: u32,
+        gp: u32,
+        sp: u32,
+        features: Option<u16>,
+    ) -> Result<()> {
+        let mut words = u32_words(&[pc, gp, sp]);
+        words.extend(features);
+        self.send(RUN, &words).await?;
         self.expect_ack(|| "RUN".into(), SHORT).await
     }
 

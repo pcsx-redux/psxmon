@@ -19,7 +19,7 @@ binary is a thin command line on top of it.
     psxmon run <file> --port DEV [--baud 115200] [--fast-reload RELOAD]
                       [--lz4 | --no-lz4] [--max-match 128] [--pcdrv DIR]
                       [--pcdrv-net [--pcdrv-net-allow HOST:PORT]...]
-                      [--timeout SECS] [-v]
+                      [--timeout SECS] [--features N] [-v]
     psxmon gdb [<file>] --port DEV [--baud 115200] [--fast-reload RELOAD]
                         [--listen 127.0.0.1:3333] [--no-lz4] [--pcdrv DIR]
                         [--pcdrv-net [--pcdrv-net-allow HOST:PORT]...]
@@ -83,6 +83,9 @@ or `0x` hex.
 - If the monitor does not answer at `--baud`, psxmon tries 115200, 230400
   and the `--fast-reload` rate, in that order. It says on stderr which rate
   answered.
+- `--features N` sends RUN's optional features word. Bit 0 keeps a board
+  watchdog (System 573, GV) kicked while the program runs; without the word
+  the monitor keeps kicking it.
 - `ping` prints the protocol version, the capability bits, and the BIOS
   checksum with its name from a table of retail BIOS images.
 - `reset` reboots the console: it writes a 28-byte stub at 0x80010000 that
