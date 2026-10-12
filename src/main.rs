@@ -3,6 +3,7 @@
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant as StdInstant};
 
 use anyhow::{Context, Result, bail};
@@ -465,6 +466,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     if let Some(sv) = server.as_mut() {
         sv.close_all();
     }
+    end_console_line();
     Ok(match (result.stop, result.exit_code) {
         (_, Some(code)) => {
             eprintln!("psxmon: exit code {code} (0x{code:x})");
@@ -500,11 +502,28 @@ fn stdout_console() -> psxmon::session::Console {
     Box::new(move |bytes: &[u8]| {
         let mut out = std::io::stdout().lock();
         let _ = match line_start.as_mut() {
-            Some(at) => out.write_all(&prefix_lines(bytes, at)),
+            Some(at) => {
+                let r = out.write_all(&prefix_lines(bytes, at));
+                MID_LINE.store(!*at, Ordering::Relaxed);
+                r
+            }
             None => out.write_all(bytes),
         };
         let _ = out.flush();
     })
+}
+
+/// On a terminal, whether the target's text stopped mid-line.
+static MID_LINE: AtomicBool = AtomicBool::new(false);
+
+/// Finish a line the target left open on the terminal, so psxmon's closing
+/// message starts on a line of its own.
+fn end_console_line() {
+    if MID_LINE.swap(false, Ordering::Relaxed) {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(b"\n");
+        let _ = out.flush();
+    }
 }
 
 /// `bytes` with [`TTY_PREFIX`] before each line start; `at_start` carries
@@ -591,6 +610,7 @@ fn gdb(args: GdbArgs) -> Result<ExitCode> {
     conn.set_nodelay(true)?;
     eprintln!("psxmon: gdb connected from {peer}");
     let reason = t.serve(conn)?;
+    end_console_line();
     if let Some(sv) = t.pcdrv_mut() {
         sv.close_all();
     }
