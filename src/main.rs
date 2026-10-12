@@ -128,6 +128,12 @@ enum Cmd {
     /// target, optionally loading a program first. Console text goes to
     /// stdout and PCDRV is served, as with `run`.
     Gdb(GdbArgs),
+    /// Reboot the console through the monitor: mask interrupts and jump to
+    /// the BIOS at 0xBFC00000. Needs a monitor that answers ping.
+    Reset {
+        #[command(flatten)]
+        link: Link,
+    },
     /// Print the monitor's protocol version, capabilities and BIOS.
     Ping {
         #[command(flatten)]
@@ -365,6 +371,32 @@ fn describe_caps(caps: u16) -> String {
             names.join(", ")
         }
     )
+}
+
+/// Where `reset` puts [`RESET_STUB`]: the usual program start, clear of the
+/// monitor's core (kernel cave) and of the retail loader (0x801C0000).
+const RESET_STUB_ADDR: u32 = 0x8001_0000;
+
+/// RUN enters the target with interrupts enabled (PROTOCOL.md: the monitor's
+/// RUN SR), and WRITE_MEM stores bytes, so the masking runs on the target:
+/// word stores to I_MASK and I_STAT, SR to 0, then into the BIOS.
+const RESET_STUB: [u32; 7] = [
+    0x3c08_1f80, // lui   t0, 0x1f80
+    0xad00_1074, // sw    zero, 0x1074(t0)   I_MASK
+    0xad00_1070, // sw    zero, 0x1070(t0)   I_STAT
+    0x4080_6000, // mtc0  zero, $12          SR
+    0x3c08_bfc0, // lui   t0, 0xbfc0
+    0x0100_0008, // jr    t0
+    0x0000_0000, // nop
+];
+
+async fn reset(link: Link) -> Result<ExitCode> {
+    let mut s = attach(&link).await?;
+    let stub: Vec<u8> = RESET_STUB.iter().flat_map(|w| w.to_le_bytes()).collect();
+    s.write_mem(RESET_STUB_ADDR, &stub).await?;
+    s.run(RESET_STUB_ADDR, 0, 0).await?;
+    eprintln!("psxmon: reset: jumped to 0xbfc00000");
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn ping(link: Link) -> Result<ExitCode> {
@@ -721,6 +753,7 @@ async fn dispatch(cmd: Cmd) -> Result<ExitCode> {
         Cmd::Gdb(_) => bail!("gdb cannot run inside the async dispatcher"),
         Cmd::Run(args) => run(args).await,
         Cmd::Ping { link } => ping(link).await,
+        Cmd::Reset { link } => reset(link).await,
         Cmd::Dump {
             addr,
             len,

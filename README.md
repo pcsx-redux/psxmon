@@ -23,6 +23,7 @@ binary is a thin command line on top of it.
                         [--listen 127.0.0.1:3333] [--no-lz4] [--pcdrv DIR]
                         [--real-step] [-v]
     psxmon ping --port DEV [--baud 115200]
+    psxmon reset --port DEV
     psxmon dump <addr> <len> -o FILE --port DEV
     psxmon write <addr> <file> --port DEV
     psxmon h2700-reset [--mode 7] [--port atcons[:BASE]] [--no-connect]
@@ -71,6 +72,12 @@ or `0x` hex.
   answered.
 - `ping` prints the protocol version, the capability bits, and the BIOS
   checksum with its name from a table of retail BIOS images.
+- `reset` reboots the console: it writes a 28-byte stub at 0x80010000 that
+  masks every interrupt and jumps to 0xBFC00000, and starts it with RUN. It
+  needs a monitor that answers `ping`, which a running program allows when
+  it takes interrupts (STOP, see PROTOCOL.md); otherwise it fails like
+  `ping`, and it is the power button. On the H2700, `h2700-reset` drives the
+  hardware reset line instead.
 - `patch-h2700` builds a flash image for the H2700 from the OpenBIOS
   monitor ELF and STOCK, either a dump of the cart's own 512 KiB flash or
   the FLASH27 kit's `H2700.IMG` (patched in place, same length, only its
