@@ -44,7 +44,7 @@ clean
 make -C "$cart" -j"$jobs"
 cp "$cart/monitor-cart.rom" "$out/monitor-sio1-cart.rom"
 
-for board in psx232h-a20 psx232h-a0 picodev-usb picodev-uart piodev-lite orion; do
+for board in psx232h-a20 psx232h-a0 picodev-usb picodev-uart piodev-lite orion powerreplay; do
     clean
     make -C "$retail" -j"$jobs" MONITOR_LINK=FT232H MONITOR_FT232H_BOARD="$board"
     cp "$retail/monitor-retail.ps-exe" "$out/monitor-ft232h-$board.ps-exe"
@@ -60,7 +60,7 @@ openbios BOOT=cart MONITOR_LINK=SIO1
 cp "$nugget/openbios/openbios.bin" "$out/openbios-sio1-cart.rom"
 openbios BOOT=rom MONITOR_LINK=SIO1
 cp "$nugget/openbios/openbios.bin" "$out/openbios-sio1.rom"
-for board in psx232h-a20 psx232h-a0 picodev-usb picodev-uart piodev-lite orion; do
+for board in psx232h-a20 psx232h-a0 picodev-usb picodev-uart piodev-lite orion powerreplay; do
     openbios BOOT=rom MONITOR_LINK=FT232H MONITOR_FT232H_BOARD="$board"
     cp "$nugget/openbios/openbios.bin" "$out/openbios-ft232h-$board.rom"
 done
