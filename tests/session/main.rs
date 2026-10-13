@@ -547,3 +547,139 @@ async fn ram_probe_skips_a_small_bank() {
     assert_eq!(s.probe_ram().await.expect("probe"), 8 << 20);
     assert_eq!(lock(&stats).cmds[mark..], [READ_MEM]);
 }
+
+#[tokio::test]
+async fn progress_counts_pipelined_chunks_per_ack() {
+    let (v, lz4) = load_progress(CAP_PIPELINE, &program_text(40000)).await;
+    assert_eq!(lz4, None);
+    assert_eq!(
+        v,
+        [
+            (8192, 40000),
+            (16384, 40000),
+            (24576, 40000),
+            (32768, 40000),
+            (40000, 40000)
+        ]
+    );
+    let (v, lz4) = load_progress(CAP_LZ4 | CAP_PIPELINE, &program_text(200_000)).await;
+    let comp = lz4.expect("sent as LZ4");
+    assert!(v.len() > PIPELINE_DEPTH, "{v:?}");
+    assert!(v.iter().all(|&(_, total)| total == comp), "{v:?}");
+    assert!(v.windows(2).all(|w| w[0].0 < w[1].0), "{v:?}");
+    assert_eq!(v.last(), Some(&(comp, comp)));
+}
+
+/// Frames in flight at once with CAP_PIPELINE.
+const PIPELINE_DEPTH: usize = 4;
+
+/// A hand-driven monitor on the device end of `dev`: PONGs every PING with
+/// CAP_PIPELINE, and answers every other frame with what `reply` returns for
+/// its type and how many of that type came before (None: no answer).
+fn scripted<F>(mut dev: tokio::io::DuplexStream, reply: F) -> Arc<Mutex<Vec<u16>>>
+where
+    F: Fn(u16, usize) -> Option<(u16, Vec<u16>)> + Send + 'static,
+{
+    use psxmon::frame::{Event, Parser, encode_frame, u32_words};
+    use tokio::io::AsyncReadExt;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    tokio::spawn(async move {
+        let mut parser = Parser::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = match dev.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            parser.feed(&buf[..n]);
+            while let Some(ev) = parser.next_event() {
+                let Event::Frame(f) = ev else { continue };
+                let out = if f.ty == PING {
+                    let mut p = vec![PROTO_VER, CAP_PIPELINE];
+                    p.extend(u32_words(&[BIOS]));
+                    Some((PONG, p))
+                } else {
+                    let nth = {
+                        let mut s = log.lock().expect("script log");
+                        let nth = s.iter().filter(|&&t| t == f.ty).count();
+                        s.push(f.ty);
+                        nth
+                    };
+                    reply(f.ty, nth)
+                };
+                if let Some((ty, words)) = out {
+                    let wire = encode_frame(ty, &words).expect("frame");
+                    if dev.write_all(&wire).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    seen
+}
+
+async fn attach_scripted<F>(reply: F) -> (Session<MemTransport>, Arc<Mutex<Vec<u16>>>)
+where
+    F: Fn(u16, usize) -> Option<(u16, Vec<u16>)> + Send + 'static,
+{
+    let (host, dev, _rate) = MemTransport::pair(115200);
+    let seen = scripted(dev, reply);
+    let mut s = Session::new(host);
+    assert!(
+        s.ping(Duration::from_secs(2), &[]).await.expect("ping"),
+        "no PONG"
+    );
+    assert_eq!(s.caps, CAP_PIPELINE);
+    (s, seen)
+}
+
+/// The first WRITE_MEM of a pipelined write fails while three more are in
+/// flight; their ACKs must not answer the SET_REG that follows (as in a
+/// PCDRV read whose write_mem fails, then serve_pcdrv's set_reg).
+#[tokio::test]
+async fn failed_pipelined_write_leaves_no_stale_ack() {
+    let (mut s, seen) = attach_scripted(|ty, nth| match ty {
+        WRITE_MEM if nth == 0 => Some((ERROR, vec![E_CKSUM])),
+        WRITE_MEM => Some((ACK, vec![])),
+        _ => Some((ERROR, vec![E_BADSTATE])),
+    })
+    .await;
+    let e = s
+        .write_mem(0x8001_0000, &[0u8; 4 * 8192])
+        .await
+        .expect_err("first chunk fails");
+    assert!(e.to_string().contains("WRITE_MEM at 0x80010000"), "{e}");
+    let e = s
+        .set_reg(2, 1)
+        .await
+        .expect_err("SET_REG is answered with ERROR, not a stale ACK");
+    assert!(e.to_string().contains("EBADSTATE"), "{e}");
+    assert_eq!(
+        *seen.lock().expect("script log"),
+        [WRITE_MEM, WRITE_MEM, WRITE_MEM, WRITE_MEM, SET_REG]
+    );
+}
+
+/// When the replies of the frames still in flight cannot all be read back,
+/// the session refuses further requests until a PING resynchronises it.
+#[tokio::test]
+async fn unaccounted_pipelined_replies_poison_the_session() {
+    let (mut s, seen) = attach_scripted(|ty, nth| match ty {
+        WRITE_MEM if nth == 0 => Some((ERROR, vec![E_CKSUM])),
+        WRITE_MEM if nth == 1 => Some((ACK, vec![])),
+        // The last two replies are lost.
+        WRITE_MEM => None,
+        _ => Some((ACK, vec![])),
+    })
+    .await;
+    s.write_mem(0x8001_0000, &[0u8; 4 * 8192])
+        .await
+        .expect_err("first chunk fails");
+    let e = s.set_reg(2, 1).await.expect_err("poisoned");
+    assert!(e.to_string().contains("out of step"), "{e}");
+    assert!(!seen.lock().expect("script log").contains(&SET_REG));
+    assert!(s.ping(Duration::from_secs(2), &[]).await.expect("ping"));
+    s.set_reg(2, 1).await.expect("SET_REG after resync");
+}

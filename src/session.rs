@@ -65,6 +65,8 @@ pub enum SessionError {
     TooLarge(&'static str),
     #[error("monitor: {0}")]
     Other(String),
+    #[error("monitor: link out of step after a failed {0}; PING to resynchronise")]
+    OutOfStep(String),
 }
 
 pub type Result<T> = std::result::Result<T, SessionError>;
@@ -186,6 +188,10 @@ pub struct Session<T: Transport> {
     hw_live: bool,
     /// What [`Session::probe_ram`] found, once it has run.
     ram_size: Option<u32>,
+    /// Set when a pipelined transfer failed with replies unaccounted for:
+    /// one of them could answer a later request, so only PING is sent
+    /// until a PONG resynchronises the link.
+    out_of_step: Option<String>,
 }
 
 impl<T: Transport> Session<T> {
@@ -204,6 +210,7 @@ impl<T: Transport> Session<T> {
             hw: HwBreaks::default(),
             hw_live: false,
             ram_size: None,
+            out_of_step: None,
         }
     }
 
@@ -232,6 +239,11 @@ impl<T: Transport> Session<T> {
     }
 
     pub async fn send(&mut self, ty: u16, payload: &[u16]) -> Result<()> {
+        if ty != PING
+            && let Some(what) = &self.out_of_step
+        {
+            return Err(SessionError::OutOfStep(what.clone()));
+        }
         self.io.write_all(&encode_frame(ty, payload)?).await?;
         self.io.flush().await?;
         Ok(())
@@ -296,6 +308,8 @@ impl<T: Transport> Session<T> {
             if let Some(pong) = self.wait_frame(&[PONG], slot).await?
                 && pong.ok
             {
+                // Anything a lost reply left in flight came before the PONG.
+                self.out_of_step = None;
                 if let Some(&v) = pong.words.first() {
                     self.version = Some(v);
                 }
@@ -361,13 +375,53 @@ impl<T: Transport> Session<T> {
         }
     }
 
+    /// After a pipelined transfer fails with `in_flight` frames still
+    /// unanswered, read their replies back, so that none of them is taken
+    /// for a later request's. If they cannot all be accounted for (a reply
+    /// timed out, the link failed), the session is put out of step. Returns
+    /// `r` as it was.
+    async fn settle(&mut self, r: Result<()>, in_flight: usize, what: &str) -> Result<()> {
+        let Err(e) = r else { return Ok(()) };
+        if in_flight == 0 {
+            return Err(e);
+        }
+        // A timed-out reply may still come, a failed link may have cut a
+        // frame short: what follows cannot be matched up.
+        let mut known = matches!(e, SessionError::Monitor { .. } | SessionError::Checksum(_));
+        for _ in 0..in_flight {
+            if !known {
+                break;
+            }
+            known = matches!(
+                self.wait_frame(&[ACK, ERROR], deadline_after(BULK)).await,
+                Ok(Some(_))
+            );
+        }
+        if !known {
+            self.out_of_step = Some(what.to_owned());
+        }
+        Err(e)
+    }
+
     async fn bulk_write(&mut self, ty: u16, name: &str, addr: u32, data: &[u8]) -> Result<()> {
         u32_len(data.len(), "write length")?;
-        let mut at = addr;
-        let mut sent: usize = 0;
         // Frames sent but not yet ACKed: their address and the bytes sent
         // once they are, so progress is reported per ACK, not per send.
         let mut pending = VecDeque::new();
+        let r = self.bulk_frames(ty, name, addr, data, &mut pending).await;
+        self.settle(r, pending.len(), name).await
+    }
+
+    async fn bulk_frames(
+        &mut self,
+        ty: u16,
+        name: &str,
+        addr: u32,
+        data: &[u8],
+        pending: &mut VecDeque<(u32, usize)>,
+    ) -> Result<()> {
+        let mut at = addr;
+        let mut sent: usize = 0;
         for chunk in data.chunks(CHUNK_BYTES) {
             let n = u32_len(chunk.len(), "chunk")?;
             let mut payload = u32_words(&[at, n]);
@@ -405,9 +459,23 @@ impl<T: Transport> Session<T> {
     pub async fn load_lz4(&mut self, addr: u32, raw_len: usize, comp: &[u8]) -> Result<()> {
         let raw_len = u32_len(raw_len, "LZ4 raw length")?;
         let clen = u32_len(comp.len(), "LZ4 block")?;
-        let mut off: u32 = 0;
         // Frames sent but not yet ACKed: their offset and length.
         let mut pending = VecDeque::new();
+        let r = self
+            .lz4_frames(addr, raw_len, clen, comp, &mut pending)
+            .await;
+        self.settle(r, pending.len(), "LZ4 LOAD").await
+    }
+
+    async fn lz4_frames(
+        &mut self,
+        addr: u32,
+        raw_len: u32,
+        clen: u32,
+        comp: &[u8],
+        pending: &mut VecDeque<(u32, u32)>,
+    ) -> Result<()> {
+        let mut off: u32 = 0;
         for chunk in comp.chunks(CHUNK_BYTES) {
             let n = u32_len(chunk.len(), "chunk")?;
             let mut payload = u32_words(&[addr, raw_len, clen, off, n]);
