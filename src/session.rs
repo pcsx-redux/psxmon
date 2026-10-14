@@ -74,6 +74,11 @@ pub enum SessionError {
     Other(String),
     #[error("monitor: link out of step after a failed {0}; PING to resynchronise")]
     OutOfStep(String),
+    /// The monitor answered the first slice of an LZ4 LOAD with EBADCMD: it
+    /// takes no LZ4 here (a System 573 build above 518400 baud, or a build
+    /// without LZ4), so nothing of the load was written.
+    #[error("monitor: LZ4 LOAD refused (EBADCMD)")]
+    Lz4Refused,
 }
 
 pub type Result<T> = std::result::Result<T, SessionError>;
@@ -199,6 +204,9 @@ pub struct Session<T: Transport> {
     /// one of them could answer a later request, so only PING is sent
     /// until a PONG resynchronises the link.
     out_of_step: Option<String>,
+    /// Set once the monitor has refused an LZ4 LOAD: [`Session::load`]
+    /// sends plain LOAD frames for the rest of the session.
+    pub lz4_refused: bool,
 }
 
 impl<T: Transport> Session<T> {
@@ -218,6 +226,7 @@ impl<T: Transport> Session<T> {
             hw_live: false,
             ram_size: None,
             out_of_step: None,
+            lz4_refused: false,
         }
     }
 
@@ -412,7 +421,10 @@ impl<T: Transport> Session<T> {
         }
         // A timed-out reply may still come, a failed link may have cut a
         // frame short: what follows cannot be matched up.
-        let mut known = matches!(e, SessionError::Monitor { .. } | SessionError::Checksum(_));
+        let mut known = matches!(
+            e,
+            SessionError::Monitor { .. } | SessionError::Checksum(_) | SessionError::Lz4Refused
+        );
         for _ in 0..in_flight {
             if !known {
                 break;
@@ -510,34 +522,59 @@ impl<T: Transport> Session<T> {
             if pending.len() >= self.pipeline_depth()
                 && let Some((o, len)) = pending.pop_front()
             {
-                self.expect_ack(|| format!("LZ4 LOAD at offset {o}"), BULK)
-                    .await?;
+                self.lz4_ack(o).await?;
                 self.report_progress(to_usize(o.saturating_add(len))?, comp.len());
             }
             // off + n <= clen, a u32.
             off = off.saturating_add(n);
         }
         while let Some((o, len)) = pending.pop_front() {
-            self.expect_ack(|| format!("LZ4 LOAD at offset {o}"), BULK)
-                .await?;
+            self.lz4_ack(o).await?;
             self.report_progress(to_usize(o.saturating_add(len))?, comp.len());
         }
         Ok(())
     }
 
+    /// The ACK of the LZ4 slice at offset `o`. EBADCMD for the first slice
+    /// is [`SessionError::Lz4Refused`]; for a later one it is an error like
+    /// any other, as part of the load has already been written.
+    async fn lz4_ack(&mut self, o: u32) -> Result<()> {
+        match self
+            .expect_ack(|| format!("LZ4 LOAD at offset {o}"), BULK)
+            .await
+        {
+            Err(SessionError::Monitor { code: E_BADCMD, .. }) if o == 0 => {
+                Err(SessionError::Lz4Refused)
+            }
+            r => r,
+        }
+    }
+
     /// Load `data` at `addr`: LZ4 when asked for, the monitor has it, and it
-    /// shrinks the data enough; plain LOAD otherwise.
+    /// shrinks the data enough; plain LOAD otherwise. If the monitor refuses
+    /// the first LZ4 slice, the whole load is sent again as plain LOAD, and
+    /// so is every later load of the session.
     pub async fn load(&mut self, addr: u32, data: &[u8], opts: &LoadOptions) -> Result<LoadStats> {
-        if opts.lz4 && self.caps & CAP_LZ4 != 0 && !data.is_empty() {
+        if opts.lz4 && !self.lz4_refused && self.caps & CAP_LZ4 != 0 && !data.is_empty() {
             let comp = lz4::compress(data, opts.max_match)?;
             let comp_len = f64::from(u32_len(comp.len(), "LZ4 block")?);
             let raw_len = f64::from(u32_len(data.len(), "load length")?);
             if comp_len < raw_len * opts.max_ratio {
-                self.load_lz4(addr, data.len(), &comp).await?;
-                return Ok(LoadStats {
-                    bytes: data.len(),
-                    lz4_bytes: Some(comp.len()),
-                });
+                match self.load_lz4(addr, data.len(), &comp).await {
+                    Ok(()) => {
+                        return Ok(LoadStats {
+                            bytes: data.len(),
+                            lz4_bytes: Some(comp.len()),
+                        });
+                    }
+                    Err(SessionError::Lz4Refused) => {
+                        eprintln!(
+                            "psxmon: monitor refused LZ4 LOAD (EBADCMD); falling back to raw LOAD"
+                        );
+                        self.lz4_refused = true;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
         self.load_raw(addr, data).await?;
@@ -732,7 +769,21 @@ impl<T: Transport> Session<T> {
     }
 
     pub async fn run(&mut self, pc: u32, gp: u32, sp: u32) -> Result<()> {
-        self.send(RUN, &u32_words(&[pc, gp, sp])).await?;
+        self.run_with_features(pc, gp, sp, None).await
+    }
+
+    /// RUN, with the optional features word ([`proto::FEAT_WATCHDOG`]) when
+    /// `features` is set. Without it the monitor uses its default.
+    pub async fn run_with_features(
+        &mut self,
+        pc: u32,
+        gp: u32,
+        sp: u32,
+        features: Option<u16>,
+    ) -> Result<()> {
+        let mut words = u32_words(&[pc, gp, sp]);
+        words.extend(features);
+        self.send(RUN, &words).await?;
         self.expect_ack(|| "RUN".into(), SHORT).await
     }
 
