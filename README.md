@@ -76,6 +76,9 @@ or `0x` hex.
 - LZ4 is used when the monitor advertises it and it shrinks the upload. The
   compressor caps every match at `--max-match` bytes, because the monitor
   decodes while it receives and cannot pause the sender inside a frame.
+  A monitor that refuses the first LZ4 slice with EBADCMD (a System 573
+  build above 518400 baud) gets the whole upload again as plain LOAD, and
+  psxmon sends plain LOAD for the rest of the session.
 - `--fast-reload 9` switches SIO1 to 230400 baud after attaching (SET_BAUD
   with its two-PING confirmation). If the new rate does not answer, psxmon
   falls back to the old one. The monitor keeps the new rate, so later
