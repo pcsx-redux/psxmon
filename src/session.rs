@@ -309,10 +309,18 @@ impl<T: Transport> Session<T> {
     /// (the SET_BAUD window PONGs) leaves caps and BIOS as they were. On a
     /// byte link the first PING that goes unanswered is followed by
     /// [`RESYNC_ZEROS`] zero bytes, in case the monitor is inside a frame
-    /// that lost bytes and is taking the PINGs for its payload.
+    /// that lost bytes and is taking the PINGs for its payload. The zeros
+    /// land in that frame's destination if it was a WRITE_MEM or LOAD, as
+    /// the PINGs would have; the write that lost bytes has already failed.
     pub async fn ping(&mut self, wait: Duration, payload: &[u16]) -> Result<bool> {
+        self.ping_resync(wait, payload, true).await
+    }
+
+    /// [`Session::ping`] with the zeros optional: the SET_BAUD windows wait
+    /// for exact PING bytes, not inside a frame, and are too short for them.
+    async fn ping_resync(&mut self, wait: Duration, payload: &[u16], resync: bool) -> Result<bool> {
         let deadline = deadline_after(wait);
-        let mut resynced = !self.io.byte_stream();
+        let mut resynced = !resync || !self.io.byte_stream();
         while Instant::now() < deadline {
             self.send(PING, payload).await?;
             let slot = deadline.min(deadline_after(Duration::from_millis(500)));
@@ -746,7 +754,9 @@ impl<T: Transport> Session<T> {
         let new = proto::sio1_rate(reload);
         sleep(Duration::from_millis(20)).await;
         self.io.set_baud_rate(new)?;
-        if self.ping(RATE_TRY, &[]).await? && self.ping(RATE_TRY, &[1]).await? {
+        if self.ping_resync(RATE_TRY, &[], false).await?
+            && self.ping_resync(RATE_TRY, &[1], false).await?
+        {
             self.take_text();
             return Ok(new);
         }
