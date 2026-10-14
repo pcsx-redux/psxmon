@@ -65,6 +65,12 @@ pub trait Transport: AsyncRead + AsyncWrite + Unpin + Send {
     /// Change the host side's line rate on the open link.
     fn set_baud_rate(&mut self, baud: u32) -> io::Result<()>;
     fn baud_rate(&self) -> u32;
+    /// A byte link, where bytes lost inside a frame leave the monitor
+    /// reading the rest of that frame's LEN words out of what follows. False
+    /// on the ATCONS word channel, which hunts for the SYNC word instead.
+    fn byte_stream(&self) -> bool {
+        true
+    }
 }
 
 /// How long the I/O thread blocks in one read before it looks at its
@@ -511,6 +517,10 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
 
     fn baud_rate(&self) -> u32 {
         (**self).baud_rate()
+    }
+
+    fn byte_stream(&self) -> bool {
+        (**self).byte_stream()
     }
 }
 

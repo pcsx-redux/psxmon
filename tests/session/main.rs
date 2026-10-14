@@ -683,3 +683,31 @@ async fn unaccounted_pipelined_replies_poison_the_session() {
     assert!(s.ping(Duration::from_secs(2), &[]).await.expect("ping"));
     s.set_reg(2, 1).await.expect("SET_REG after resync");
 }
+
+/// Bytes lost inside a frame: the header claims STREAM_MAX_LEN words and
+/// only four follow, so the monitor reads what the host sends next as that
+/// frame's payload. One PING per slot would take minutes to get through;
+/// the zeros sent after the first miss end the frame at once.
+#[tokio::test]
+async fn ping_resyncs_after_a_frame_cut_short() {
+    let (mut s, stats) = attach(SimConfig::default(), Box::new(Hang)).await;
+    let [len_lo, len_hi] = STREAM_MAX_LEN.to_le_bytes();
+    let cut = [
+        0x00, 0xaa, 0x55, 0x03, 0x00, len_lo, len_hi, // WRITE_MEM, LEN
+        0x00, 0x00, 0x02, 0x80, 0x00, 0x20, 0x00, 0x00, // 0x80020000, 8 KiB
+    ];
+    s.transport().write_all(&cut).await.expect("write");
+    assert!(
+        s.ping(Duration::from_secs(3), &[]).await.expect("ping"),
+        "no PONG after a frame cut short"
+    );
+    assert_eq!(lock(&stats).errors_sent, vec![E_CKSUM]);
+    let data = program_text(300);
+    s.write_mem(0x8002_0000, &data).await.expect("WRITE_MEM");
+    assert_eq!(
+        s.read_mem(0x8002_0000, len32(&data))
+            .await
+            .expect("READ_MEM"),
+        data
+    );
+}

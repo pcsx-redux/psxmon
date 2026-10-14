@@ -29,6 +29,13 @@ const RATE_TRY: Duration = Duration::from_millis(700);
 /// windows to close before PINGing at the old rate.
 const RATE_WINDOW: Duration = Duration::from_millis(2500);
 
+/// Zero bytes that end any frame a byte-link monitor can be inside: TYPE
+/// and LEN, [`STREAM_MAX_LEN`] payload words, CKSUM. The monitor takes them
+/// as the rest of that frame, whose checksum then fails (0 never matches on
+/// a byte link), and any left over as one frame start; a zero lost while it
+/// sends the error reply costs nothing.
+pub const RESYNC_ZEROS: usize = 8232;
+
 const SHORT: Duration = Duration::from_secs(2);
 const BULK: Duration = Duration::from_secs(5);
 /// Bulk frames in flight when the monitor has [`CAP_PIPELINE`]: frames go out
@@ -299,9 +306,13 @@ impl<T: Transport> Session<T> {
     }
 
     /// PING until PONG, or false after `wait`. A PONG with only the version
-    /// (the SET_BAUD window PONGs) leaves caps and BIOS as they were.
+    /// (the SET_BAUD window PONGs) leaves caps and BIOS as they were. On a
+    /// byte link the first PING that goes unanswered is followed by
+    /// [`RESYNC_ZEROS`] zero bytes, in case the monitor is inside a frame
+    /// that lost bytes and is taking the PINGs for its payload.
     pub async fn ping(&mut self, wait: Duration, payload: &[u16]) -> Result<bool> {
         let deadline = deadline_after(wait);
+        let mut resynced = !self.io.byte_stream();
         while Instant::now() < deadline {
             self.send(PING, payload).await?;
             let slot = deadline.min(deadline_after(Duration::from_millis(500)));
@@ -320,6 +331,12 @@ impl<T: Transport> Session<T> {
                     self.bios = Some(word_u32(&pong.words, 2));
                 }
                 return Ok(true);
+            }
+            if !resynced && Instant::now() < deadline {
+                resynced = true;
+                link_log(&format!("no PONG: sending {RESYNC_ZEROS} zero bytes"));
+                self.io.write_all(&[0u8; RESYNC_ZEROS]).await?;
+                self.io.flush().await?;
             }
         }
         Ok(false)

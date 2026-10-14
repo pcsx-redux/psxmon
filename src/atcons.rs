@@ -461,6 +461,10 @@ impl Transport for AtconsTransport {
     fn baud_rate(&self) -> u32 {
         0
     }
+
+    fn byte_stream(&self) -> bool {
+        false
+    }
 }
 
 impl AsyncRead for AtconsTransport {
