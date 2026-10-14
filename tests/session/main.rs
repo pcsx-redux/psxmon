@@ -147,6 +147,85 @@ async fn lz4_falls_back_to_plain_without_cap() {
     assert_eq!(lock(&stats).plain_load_frames, 3);
 }
 
+/// A monitor that answers the first LZ4 slice with EBADCMD (a System 573
+/// build above 518400 baud) gets the whole load again as plain LOAD, and
+/// plain LOAD for the rest of the session.
+#[tokio::test]
+async fn lz4_refused_on_first_slice_reloads_raw() {
+    let text = program_text(100_000);
+    let addr = 0x8001_0000;
+    let exit_at = addr + 0x100;
+    let prog = CheckAndExit {
+        addr,
+        expect: text.clone(),
+        pc: addr,
+        gp: 0,
+        sp: 0x801f_0000,
+        code: 42,
+        exit_at,
+        started: false,
+    };
+    let cfg = SimConfig {
+        caps: CAP_LZ4 | CAP_PIPELINE,
+        refuse_lz4_from: Some(0),
+        ..Default::default()
+    };
+    let (mut s, stats) = attach(cfg, Box::new(prog)).await;
+    let st = s
+        .load(addr, &text, &LoadOptions::default())
+        .await
+        .expect("load falls back to raw");
+    assert_eq!(st.lz4_bytes, None);
+    assert!(s.lz4_refused);
+    let (refused, plain) = {
+        let st = lock(&stats);
+        assert_eq!(st.lz4_frames, 0);
+        assert!(st.lz4_refused >= 1, "refused {}", st.lz4_refused);
+        assert!(
+            st.errors_sent.iter().all(|&e| e == E_BADCMD),
+            "{:?}",
+            st.errors_sent
+        );
+        assert_eq!(st.errors_sent.len(), st.lz4_refused);
+        (st.lz4_refused, st.plain_load_frames)
+    };
+    assert_eq!(plain, text.len().div_ceil(8192));
+    // The raw load wrote the data: the program finds it and exits 42.
+    s.run(addr, 0, 0x801f_0000).await.expect("RUN");
+    let r = run_until_stop(&mut s, 5, None).await;
+    assert_eq!(r.exit_code, Some(42));
+    // The next load goes raw at once.
+    let st = s
+        .load(addr, &text, &LoadOptions::default())
+        .await
+        .expect("second load");
+    assert_eq!(st.lz4_bytes, None);
+    let st = lock(&stats);
+    assert_eq!(st.lz4_refused, refused);
+    assert_eq!(st.plain_load_frames, plain * 2);
+}
+
+/// EBADCMD for a later LZ4 slice is an error: part of the load is already
+/// written, so it is not retried raw.
+#[tokio::test]
+async fn lz4_refused_mid_stream_is_an_error() {
+    let cfg = SimConfig {
+        refuse_lz4_from: Some(1),
+        ..Default::default()
+    };
+    let (mut s, stats) = attach(cfg, Box::new(Hang)).await;
+    let e = s
+        .load(0x8001_0000, &program_text(100_000), &LoadOptions::default())
+        .await
+        .expect_err("mid-stream refusal fails the load");
+    assert!(e.to_string().contains("EBADCMD"), "{e}");
+    assert!(!e.to_string().contains("offset 0"), "{e}");
+    assert!(!s.lz4_refused);
+    let st = lock(&stats);
+    assert_eq!((st.lz4_frames, st.lz4_refused), (1, 1));
+    assert_eq!(st.plain_load_frames, 0);
+}
+
 /// Run a load with a progress callback and return what it reported.
 async fn load_progress(caps: u16, data: &[u8]) -> (Vec<(usize, usize)>, Option<usize>) {
     let cfg = SimConfig {
