@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use gdbstub::stub::DisconnectReason;
 use psxmon::gdb::MonTarget;
-use psxmon::pcdrv::{PcdrvServer, Quota};
+use psxmon::pcdrv::{NetPolicy, PcdrvServer, Quota, parse_net_target};
 use psxmon::proto::{self, CAP_LZ4, CAP_SLOT, CAP_STOP, HELLO, STOP_EXIT};
 use psxmon::session::{LoadOptions, Session, deadline_after};
 use psxmon::transport::{self, parse_tcp_port};
@@ -86,6 +86,13 @@ struct RunArgs {
     /// Serve PCDRV file I/O from this directory.
     #[arg(long, value_name = "DIR")]
     pcdrv: Option<PathBuf>,
+    /// Let the program open TCP connections with PCopen("tcp://HOST:PORT").
+    #[arg(long)]
+    pcdrv_net: bool,
+    /// Allow only this HOST:PORT for --pcdrv-net, as the program writes it;
+    /// repeatable.
+    #[arg(long, value_name = "HOST:PORT", requires = "pcdrv_net", value_parser = net_target)]
+    pcdrv_net_allow: Vec<String>,
     /// Seconds to let the program run. Without it, run until the program
     /// exits or stops, or psxmon is interrupted.
     #[arg(long, value_name = "SECS")]
@@ -112,6 +119,13 @@ struct GdbArgs {
     /// Serve PCDRV file I/O from this directory.
     #[arg(long, value_name = "DIR")]
     pcdrv: Option<PathBuf>,
+    /// Let the program open TCP connections with PCopen("tcp://HOST:PORT").
+    #[arg(long)]
+    pcdrv_net: bool,
+    /// Allow only this HOST:PORT for --pcdrv-net, as the program writes it;
+    /// repeatable.
+    #[arg(long, value_name = "HOST:PORT", requires = "pcdrv_net", value_parser = net_target)]
+    pcdrv_net_allow: Vec<String>,
     /// Run every single step on the target (plant a break, CONT, stop)
     /// instead of simulating it on the host where possible. Also set by
     /// PSXMON_STEP_SIM=0.
@@ -413,6 +427,32 @@ async fn ping(link: Link) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// `--pcdrv-net-allow` values: HOST:PORT with a numeric port.
+fn net_target(text: &str) -> std::result::Result<String, String> {
+    parse_net_target(text)
+        .map(|_| text.to_owned())
+        .map_err(|e| e.to_string())
+}
+
+/// The PCDRV server `--pcdrv` and `--pcdrv-net` ask for, if any.
+fn pcdrv_server(
+    dir: Option<PathBuf>,
+    net: bool,
+    allow: Vec<String>,
+) -> Result<Option<PcdrvServer>> {
+    let mut server = match dir {
+        Some(dir) => PcdrvServer::new(&dir, Quota::default())
+            .with_context(|| format!("PCDRV dir {}", dir.display()))?,
+        None if net => PcdrvServer::without_files(Quota::default()),
+        None => return Ok(None),
+    };
+    server.set_net(NetPolicy {
+        enabled: net,
+        allow,
+    });
+    Ok(Some(server))
+}
+
 async fn run(args: RunArgs) -> Result<ExitCode> {
     let RunArgs {
         file,
@@ -421,6 +461,8 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         no_lz4,
         max_match,
         pcdrv,
+        pcdrv_net,
+        pcdrv_net_allow,
         timeout,
     } = args;
     let verbose = link.verbose;
@@ -429,13 +471,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         bail!("--max-match must be at least 7");
     }
     let image = exe::load(&file).with_context(|| format!("loading {}", file.display()))?;
-    let mut server = match pcdrv {
-        Some(dir) => Some(
-            PcdrvServer::new(&dir, Quota::default())
-                .with_context(|| format!("PCDRV dir {}", dir.display()))?,
-        ),
-        None => None,
-    };
+    let mut server = pcdrv_server(pcdrv, pcdrv_net, pcdrv_net_allow)?;
     let mut s = attach(&link).await?;
     s.verbose = verbose;
     let opts = LoadOptions {
@@ -589,6 +625,8 @@ fn gdb(args: GdbArgs) -> Result<ExitCode> {
         no_lz4,
         max_match,
         pcdrv,
+        pcdrv_net,
+        pcdrv_net_allow,
         real_step,
     } = args;
     let verbose = link.verbose;
@@ -599,13 +637,7 @@ fn gdb(args: GdbArgs) -> Result<ExitCode> {
         .as_ref()
         .map(|f| exe::load(f).with_context(|| format!("loading {}", f.display())))
         .transpose()?;
-    let server = match pcdrv {
-        Some(dir) => Some(
-            PcdrvServer::new(&dir, Quota::default())
-                .with_context(|| format!("PCDRV dir {}", dir.display()))?,
-        ),
-        None => None,
-    };
+    let server = pcdrv_server(pcdrv, pcdrv_net, pcdrv_net_allow)?;
     // Bind first, so a busy port fails before the target is touched.
     let listener =
         std::net::TcpListener::bind(&listen).with_context(|| format!("listening on {listen}"))?;

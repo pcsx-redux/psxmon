@@ -18,9 +18,11 @@ binary is a thin command line on top of it.
 
     psxmon run <file> --port DEV [--baud 115200] [--fast-reload RELOAD]
                       [--lz4 | --no-lz4] [--max-match 128] [--pcdrv DIR]
+                      [--pcdrv-net [--pcdrv-net-allow HOST:PORT]...]
                       [--timeout SECS] [-v]
     psxmon gdb [<file>] --port DEV [--baud 115200] [--fast-reload RELOAD]
                         [--listen 127.0.0.1:3333] [--no-lz4] [--pcdrv DIR]
+                        [--pcdrv-net [--pcdrv-net-allow HOST:PORT]...]
                         [--real-step] [-v]
     psxmon ping --port DEV [--baud 115200]
     psxmon reset --port DEV
@@ -46,9 +48,20 @@ or `0x` hex.
   the target's bytes unchanged. psxmon's own messages go to stderr: an
   upload progress line when stderr is a terminal, and one line per PCDRV
   open, close or failed call. It serves `break 0, 0x101..0x107` PCDRV calls
-  from `--pcdrv DIR`, jailed to that directory. Without `--pcdrv`, every
-  PCDRV call fails with -1. The run ends when the program executes
-  `break 4, 0`, with its exit code in `a0`.
+  from `--pcdrv DIR`, jailed to that directory. With neither `--pcdrv` nor
+  `--pcdrv-net`, every PCDRV call fails with -1. The run ends when the
+  program executes `break 4, 0`, with its exit code in `a0`.
+- `--pcdrv-net` (on `run` and `gdb`, with or without `--pcdrv`) lets
+  `PCopen("tcp://HOST:PORT")` connect a TCP stream, 5 s connect timeout,
+  as a handle like a file's. `PCread` on it never blocks: it returns what
+  has arrived, up to the length asked, possibly 0 bytes; a connection the
+  peer closed is -1. `PCwrite` sends everything, outside the file quotas;
+  `PClseek` is -1. `PCopen("probe:net")` succeeds only with `--pcdrv-net`,
+  so a program can test for it. Without the flag both names are -1, and no
+  `scheme://` name or `probe:net` is ever a file; only `tcp://` connects,
+  and `PCcreat` never does. `--pcdrv-net-allow HOST:PORT`, repeatable,
+  limits connects to those targets, matched literally against what the
+  program wrote.
 - Programs can be PS-EXE, ELF, CPE or PSF, told apart by their magic. An ELF
   loads its PT_LOAD segments at their physical addresses, minus the header
   sections, and starts at `e_entry` with gp from `_gp`. A CPE loads its load
