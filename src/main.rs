@@ -495,7 +495,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         }
         let st = s.load(seg.addr, &seg.data, &opts).await;
         if s.progress.take().is_some() {
-            eprint!("\r\x1b[K");
+            clear_line();
         }
         let st = st?;
         if verbose {
@@ -608,12 +608,67 @@ fn prefix_lines(bytes: &[u8], at_start: &mut bool) -> Vec<u8> {
     v
 }
 
+/// Whether stderr takes escape sequences. Always on outside Windows; on
+/// Windows, only once [`enable_vt`] has turned on virtual terminal
+/// processing for the console.
+static VT: AtomicBool = AtomicBool::new(!cfg!(windows));
+
+/// The width a line is blanked to when escape sequences are unavailable.
+const PLAIN_WIDTH: usize = 79;
+
+/// Turn on escape sequence processing for the stderr console, where the
+/// progress line goes. cmd.exe and older consoles print them literally
+/// otherwise. On failure the progress line is redrawn with spaces instead.
+#[cfg(windows)]
+fn enable_vt() {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
+        SetConsoleMode,
+    };
+    // SAFETY: plain Win32 calls on the process's own stderr handle; `mode`
+    // outlives the call that writes it.
+    let ok = unsafe {
+        let h = GetStdHandle(STD_ERROR_HANDLE);
+        let mut mode = 0;
+        !h.is_null()
+            && h != INVALID_HANDLE_VALUE
+            && GetConsoleMode(h, &mut mode) != 0
+            && SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+    };
+    VT.store(ok, Ordering::Relaxed);
+}
+
+#[cfg(not(windows))]
+fn enable_vt() {}
+
+/// Blank the current stderr line and return to its start.
+fn clear_line() {
+    if VT.load(Ordering::Relaxed) {
+        eprint!("\r\x1b[K");
+    } else {
+        eprint!("\r{:PLAIN_WIDTH$}\r", "");
+    }
+}
+
 /// A progress callback that redraws one stderr line for the upload of
-/// `what`.
+/// `what`, with the link rate since the upload started.
 fn progress_line(what: String) -> psxmon::session::Progress {
+    let start = StdInstant::now();
     Box::new(move |sent: usize, total: usize| {
         let pct = sent.saturating_mul(100).checked_div(total).unwrap_or(100);
-        eprint!("\r\x1b[Kpsxmon: uploading {what}: {pct}% of {total} bytes");
+        let secs = start.elapsed().as_secs_f64();
+        let rate = if secs > 0.0 {
+            format!(", {:.0} kB/s", sent as f64 / secs / 1000.0)
+        } else {
+            String::new()
+        };
+        let line = format!("psxmon: uploading {what}: {pct}% of {total} bytes{rate}");
+        if VT.load(Ordering::Relaxed) {
+            eprint!("\r\x1b[K{line}");
+        } else {
+            eprint!("\r{line:<PLAIN_WIDTH$}");
+        }
     })
 }
 
@@ -765,6 +820,7 @@ fn exit_status(code: u32) -> u8 {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    enable_vt();
     let result = match cli.cmd {
         Cmd::Gdb(args) => gdb(args),
         cmd => tokio::runtime::Builder::new_current_thread()
