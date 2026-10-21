@@ -10,6 +10,9 @@
 #   monitor-sio1-cart.rom           flash cartridge image, SIO1
 #   monitor-ft232h-<board>.ps-exe   PS-EXE, FT232H on the expansion port;
 #                                   boards in nugget monitor/hosts/ft232h-boards.mk
+#   monitor-ft232h-<board>.rom      flash cartridge image of the same, for
+#                                   boards that decode the FTDI clear of the
+#                                   flash
 #   openbios-sio1-cart.rom          OpenBIOS replacing the retail one from a
 #                                   flash cartridge, monitor on SIO1
 #   openbios-sio1.rom               OpenBIOS as the console's BIOS ROM, SIO1
@@ -50,6 +53,19 @@ for board in psx232h-a20 psx232h-a0 picodev-usb picodev-uart piodev-lite orion p
     cp "$retail/monitor-retail.ps-exe" "$out/monitor-ft232h-$board.ps-exe"
 done
 clean
+
+# Cart images of the FT232H monitor, for boards whose FIFO is decoded clear
+# of the cart's flash at 0x1f000000. The cart loader (rom.s) copies the PS-EXE
+# into RAM before it runs, so the monitor's EXP1 setup never moves timing
+# under code fetched from the flash.
+for board in orion; do
+    tmp=$(mktemp -d)
+    mipsel-none-elf-gcc -march=mips1 -mabi=32 -EL -c -o "$tmp/rom.o" \
+        -DPSEXE=\"$out/monitor-ft232h-$board.ps-exe\" -x assembler-with-cpp "$cart/rom.s"
+    mipsel-none-elf-ld -EL -Ttext=0x1f000000 -e 0x1f000000 -o "$tmp/rom.elf" "$tmp/rom.o"
+    mipsel-none-elf-objcopy -O binary -j .text "$tmp/rom.elf" "$out/monitor-ft232h-$board.rom"
+    rm -rf "$tmp"
+done
 
 openbios() {
     make -C "$nugget/openbios" clean >/dev/null
