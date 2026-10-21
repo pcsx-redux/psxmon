@@ -61,7 +61,7 @@ clean
 for board in orion; do
     tmp=$(mktemp -d)
     mipsel-none-elf-gcc -march=mips1 -mabi=32 -EL -c -o "$tmp/rom.o" \
-        -DPSEXE=\"$out/monitor-ft232h-$board.ps-exe\" -x assembler-with-cpp "$cart/rom.s"
+        "-DPSEXE=\"$out/monitor-ft232h-$board.ps-exe\"" -x assembler-with-cpp "$cart/rom.s"
     mipsel-none-elf-ld -EL -Ttext=0x1f000000 -e 0x1f000000 -o "$tmp/rom.elf" "$tmp/rom.o"
     mipsel-none-elf-objcopy -O binary -j .text "$tmp/rom.elf" "$out/monitor-ft232h-$board.rom"
     rm -rf "$tmp"

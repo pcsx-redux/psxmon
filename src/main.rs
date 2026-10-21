@@ -623,8 +623,8 @@ const PLAIN_WIDTH: usize = 79;
 fn enable_vt() {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::{
-        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
-        SetConsoleMode,
+        ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle,
+        STD_ERROR_HANDLE, SetConsoleMode,
     };
     // SAFETY: plain Win32 calls on the process's own stderr handle; `mode`
     // outlives the call that writes it.
@@ -634,7 +634,10 @@ fn enable_vt() {
         !h.is_null()
             && h != INVALID_HANDLE_VALUE
             && GetConsoleMode(h, &mut mode) != 0
-            && SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+            && SetConsoleMode(
+                h,
+                mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+            ) != 0
     };
     VT.store(ok, Ordering::Relaxed);
 }
