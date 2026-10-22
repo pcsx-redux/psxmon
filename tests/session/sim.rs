@@ -681,7 +681,15 @@ impl Sim {
                     };
                     return self.stopped(reason, a, 0).await;
                 }
-                Step::Fault(code) => return self.stopped(STOP_FAULT, code, 0).await,
+                // BadVaddr is reported for AdEL and AdES only (PROTOCOL.md 7).
+                Step::Fault(code) => {
+                    let bad = if code == 4 || code == 5 {
+                        self.m.reg(REG_BADVADDR)
+                    } else {
+                        0
+                    };
+                    return self.stopped(STOP_FAULT, code, bad).await;
+                }
                 Step::Break(insn) => {
                     self.last_break = insn;
                     let (reason, a) = if self.cfg.legacy_exit && insn == EXIT_BREAK {
@@ -700,13 +708,18 @@ impl Sim {
     async fn stopped(&mut self, reason: u16, a: u32, b: u32) -> bool {
         self.ctx = true;
         self.epc = self.m.reg(REG_PC);
-        self.m.set(REG_BADVADDR, 0);
+        if reason != STOP_FAULT || b == 0 {
+            self.m.set(REG_BADVADDR, 0);
+        }
         let mut p = vec![reason];
         p.extend(u32_words(&[self.epc, a, b]));
         self.send_frame(STOPPED, &p).await;
         true
     }
 }
+
+/// Cause.BD: the exception was in a branch delay slot.
+const CAUSE_BD: u32 = 1 << 31;
 
 // ---- an R3000 subset, for debugger tests ----
 
@@ -955,7 +968,11 @@ impl Interp {
                     return Effect::Watch;
                 }
                 if (op == 0x21 || op == 0x25) && addr & 1 != 0 || op == 0x23 && addr & 3 != 0 {
+                    m.set(REG_BADVADDR, addr);
                     return Effect::Fault(4); // AdEL
+                }
+                if psxmon::mips::region(addr).is_none() {
+                    return Effect::Fault(7); // DBE
                 }
                 let v = match op {
                     0x20 => i32::from(m.read(addr, 1)[0].cast_signed()).cast_unsigned(),
@@ -976,7 +993,11 @@ impl Interp {
                     return Effect::Watch;
                 }
                 if op == 0x29 && addr & 1 != 0 || op == 0x2b && addr & 3 != 0 {
+                    m.set(REG_BADVADDR, addr);
                     return Effect::Fault(5); // AdES
+                }
+                if psxmon::mips::region(addr).is_none() {
+                    return Effect::Fault(7); // DBE
                 }
                 let n = match op {
                     0x28 => 1,
@@ -1040,6 +1061,23 @@ impl Program for Interp {
                 m.set(REG_PC, epc);
                 return Step::Hw { data: false };
             }
+            // Fetch faults: AdEL with BadVaddr = PC, IBE where nothing is.
+            let fetch = if pc & 3 != 0 {
+                m.set(REG_BADVADDR, pc);
+                Some(4)
+            } else if psxmon::mips::region(pc).is_none() {
+                Some(6)
+            } else {
+                None
+            };
+            if let Some(code) = fetch {
+                m.set(
+                    REG_CAUSE,
+                    (code << 2) | if branch.is_some() { CAUSE_BD } else { 0 },
+                );
+                m.set(REG_PC, epc);
+                return Step::Fault(code);
+            }
             let insn = m.read32(pc);
             let mut next = npc.wrapping_add(4);
             let mut is_branch = false;
@@ -1066,6 +1104,10 @@ impl Program for Interp {
                     return Step::Hw { data: true };
                 }
                 Effect::Fault(code) => {
+                    m.set(
+                        REG_CAUSE,
+                        (code << 2) | if branch.is_some() { CAUSE_BD } else { 0 },
+                    );
                     m.set(REG_PC, epc);
                     return Step::Fault(code);
                 }

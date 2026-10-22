@@ -215,6 +215,50 @@ fn elf_symbol(file: &[u8], sections: &[ElfSection], wanted: &str) -> Option<u32>
     None
 }
 
+/// A named address from an ELF symbol table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    pub addr: u32,
+    /// `st_size`; 0 for assembler labels and other unsized symbols.
+    pub size: u32,
+}
+
+/// The defined function, object and untyped symbols of an ELF, sorted by
+/// address. Section, file and undefined symbols are left out.
+pub fn elf_symbols(file: &[u8]) -> Result<Vec<Symbol>, ExeError> {
+    if !file.starts_with(b"\x7fELF") {
+        return Err(ExeError::Elf("not an ELF file".into()));
+    }
+    let sections = elf_sections(file)?;
+    let mut out = Vec::new();
+    for symtab in sections.iter().filter(|s| s.ty == SHT_SYMTAB) {
+        let Some(strings) = usize::try_from(symtab.link)
+            .ok()
+            .and_then(|i| sections.get(i))
+            .and_then(|t| file.get(t.offset..t.offset.saturating_add(t.size)))
+        else {
+            continue;
+        };
+        let table = file
+            .get(symtab.offset..symtab.offset.saturating_add(symtab.size))
+            .ok_or(ExeError::Truncated("ELF symbol table"))?;
+        for sym in table.as_chunks::<16>().0 {
+            let name = c_string(strings, to_usize(rd32(sym, 0, "symbol")?, "st_name")?);
+            let addr = rd32(sym, 4, "symbol")?;
+            let size = rd32(sym, 8, "symbol")?;
+            let info = sym.get(12).copied().unwrap_or(0);
+            let shndx = rd16(sym, 14, "symbol")?;
+            // STT_NOTYPE, STT_OBJECT, STT_FUNC; SHN_UNDEF is 0.
+            if info & 0xf <= 2 && shndx != 0 && !name.is_empty() && !name.starts_with('$') {
+                out.push(Symbol { name, addr, size });
+            }
+        }
+    }
+    out.sort_by_key(|s| s.addr);
+    Ok(out)
+}
+
 /// A 32-bit little-endian MIPS ELF. Each PT_LOAD segment is written at its
 /// `p_paddr`, trimmed to the allocated, file-backed sections it holds other
 /// than `*_Header` ones (the PS-EXE header section the nugget linker script
@@ -810,6 +854,27 @@ mod tests {
         assert_eq!(seg.data.get(0x10..0x20), Some(&[0; 0x10][..]));
         assert_eq!(seg.data.get(0x20..), Some(&[0xbb; 0x20][..]));
         assert_eq!(parse(&build_elf(false)).expect("parse ELF").gp, 0);
+    }
+
+    #[test]
+    fn elf_symbols_keep_defined_functions_objects_and_labels() {
+        // build_elf's `_gp` is undefined (st_shndx 0), so it is left out.
+        assert_eq!(elf_symbols(&build_elf(true)).expect("symbols"), vec![]);
+        // Make it a defined function of size 0x40 in section 2: st_size at
+        // +8, st_info at +12, st_shndx at +14 of symbol 1.
+        let sym = 0x1200 + 16;
+        let mut f = build_elf(true);
+        f.splice(sym + 8..sym + 16, [0x40, 0, 0, 0, 2, 0, 2, 0]);
+        let want = Symbol {
+            name: "_gp".into(),
+            addr: 0x8001_8000,
+            size: 0x40,
+        };
+        assert_eq!(elf_symbols(&f).expect("symbols"), vec![want]);
+        // A section symbol (STT_SECTION, 3) is not a name for code.
+        f[sym + 12] = 3;
+        assert_eq!(elf_symbols(&f).expect("symbols"), vec![]);
+        assert!(elf_symbols(b"PS-X EXE").is_err());
     }
 
     #[test]

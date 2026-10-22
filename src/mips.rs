@@ -99,6 +99,174 @@ pub fn has_delay_slot(insn: u32) -> bool {
     }
 }
 
+/// gdb's names for r0-r31.
+pub const REG_NAMES: [&str; 32] = [
+    "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6",
+    "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp",
+    "ra",
+];
+
+fn rname(index: u32) -> &'static str {
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| REG_NAMES.get(i))
+        .copied()
+        .unwrap_or("?")
+}
+
+fn simm(insn: u32) -> i32 {
+    i32::from(u16::try_from(insn & 0xffff).unwrap_or(0).cast_signed())
+}
+
+/// The R3000 instruction `insn` at `pc` in objdump's style (`lw v0,4(a0)`),
+/// or `.word 0x...` for a word that is not one.
+pub fn disasm(pc: u32, insn: u32) -> String {
+    let op = insn >> 26;
+    let rs = rname(field(insn, 21, 5));
+    let rt = rname(field(insn, 16, 5));
+    let rd = rname(field(insn, 11, 5));
+    let sa = field(insn, 6, 5);
+    let imm = simm(insn);
+    let uimm = insn & 0xffff;
+    let target = branch_target(pc, insn);
+    let word = format!(".word 0x{insn:08x}");
+    let mem = |name: &str| format!("{name:<7} {rt},{imm}({rs})");
+    match op {
+        0 => {
+            let three = |name: &str| format!("{name:<7} {rd},{rs},{rt}");
+            match insn & 0x3f {
+                0x00 if insn == 0 => "nop".into(),
+                0x00 => format!("sll     {rd},{rt},0x{sa:x}"),
+                0x02 => format!("srl     {rd},{rt},0x{sa:x}"),
+                0x03 => format!("sra     {rd},{rt},0x{sa:x}"),
+                0x04 => format!("sllv    {rd},{rt},{rs}"),
+                0x06 => format!("srlv    {rd},{rt},{rs}"),
+                0x07 => format!("srav    {rd},{rt},{rs}"),
+                0x08 => format!("jr      {rs}"),
+                0x09 if field(insn, 11, 5) == 31 => format!("jalr    {rs}"),
+                0x09 => format!("jalr    {rd},{rs}"),
+                0x0c if field(insn, 6, 20) == 0 => "syscall".into(),
+                0x0c => format!("syscall 0x{:x}", field(insn, 6, 20)),
+                0x0d => format!(
+                    "break   0x{:x},0x{:x}",
+                    field(insn, 16, 10),
+                    field(insn, 6, 10)
+                ),
+                0x10 => format!("mfhi    {rd}"),
+                0x11 => format!("mthi    {rs}"),
+                0x12 => format!("mflo    {rd}"),
+                0x13 => format!("mtlo    {rs}"),
+                0x18 => format!("mult    {rs},{rt}"),
+                0x19 => format!("multu   {rs},{rt}"),
+                0x1a => format!("div     {rs},{rt}"),
+                0x1b => format!("divu    {rs},{rt}"),
+                0x20 => three("add"),
+                0x21 if field(insn, 16, 5) == 0 => format!("move    {rd},{rs}"),
+                0x21 => three("addu"),
+                0x22 => three("sub"),
+                0x23 => three("subu"),
+                0x24 => three("and"),
+                0x25 => three("or"),
+                0x26 => three("xor"),
+                0x27 => three("nor"),
+                0x2a => three("slt"),
+                0x2b => three("sltu"),
+                _ => word,
+            }
+        }
+        // The R3000 decodes only bits 0 and 4 of rt (see next_pc).
+        1 => {
+            let name = match field(insn, 16, 5) & 0x11 {
+                0x00 => "bltz",
+                0x01 => "bgez",
+                0x10 => "bltzal",
+                _ => "bgezal",
+            };
+            format!("{name:<7} {rs},0x{target:08x}")
+        }
+        2 | 3 => {
+            let to = (pc.wrapping_add(4) & 0xf000_0000) | ((insn & 0x03ff_ffff) << 2);
+            format!("{:<7} 0x{to:08x}", if op == 2 { "j" } else { "jal" })
+        }
+        4 if field(insn, 16, 5) == 0 && field(insn, 21, 5) == 0 => {
+            format!("b       0x{target:08x}")
+        }
+        4 if field(insn, 16, 5) == 0 => format!("beqz    {rs},0x{target:08x}"),
+        4 => format!("beq     {rs},{rt},0x{target:08x}"),
+        5 if field(insn, 16, 5) == 0 => format!("bnez    {rs},0x{target:08x}"),
+        5 => format!("bne     {rs},{rt},0x{target:08x}"),
+        6 => format!("blez    {rs},0x{target:08x}"),
+        7 => format!("bgtz    {rs},0x{target:08x}"),
+        8 => format!("addi    {rt},{rs},{imm}"),
+        9 if field(insn, 21, 5) == 0 => format!("li      {rt},{imm}"),
+        9 => format!("addiu   {rt},{rs},{imm}"),
+        0x0a => format!("slti    {rt},{rs},{imm}"),
+        0x0b => format!("sltiu   {rt},{rs},{imm}"),
+        0x0c => format!("andi    {rt},{rs},0x{uimm:x}"),
+        0x0d => format!("ori     {rt},{rs},0x{uimm:x}"),
+        0x0e => format!("xori    {rt},{rs},0x{uimm:x}"),
+        0x0f => format!("lui     {rt},0x{uimm:x}"),
+        0x10..=0x13 => {
+            let z = op & 3;
+            let creg = field(insn, 11, 5);
+            match field(insn, 21, 5) {
+                0 => format!("mfc{z}    {rt},${creg}"),
+                2 => format!("cfc{z}    {rt},${creg}"),
+                4 => format!("mtc{z}    {rt},${creg}"),
+                6 => format!("ctc{z}    {rt},${creg}"),
+                8 => {
+                    let tf = if field(insn, 16, 1) == 1 { 't' } else { 'f' };
+                    format!("bc{z}{tf}    0x{target:08x}")
+                }
+                r if r & 0x10 != 0 && z == 0 && insn & 0x3f == 0x10 => "rfe".into(),
+                r if r & 0x10 != 0 => format!("cop{z}    0x{:x}", insn & 0x01ff_ffff),
+                _ => word,
+            }
+        }
+        0x20 => mem("lb"),
+        0x21 => mem("lh"),
+        0x22 => mem("lwl"),
+        0x23 => mem("lw"),
+        0x24 => mem("lbu"),
+        0x25 => mem("lhu"),
+        0x26 => mem("lwr"),
+        0x28 => mem("sb"),
+        0x29 => mem("sh"),
+        0x2a => mem("swl"),
+        0x2b => mem("sw"),
+        0x2e => mem("swr"),
+        0x30..=0x33 => format!("lwc{}    ${},{imm}({rs})", op & 3, field(insn, 16, 5)),
+        0x38..=0x3b => format!("swc{}    ${},{imm}({rs})", op & 3, field(insn, 16, 5)),
+        _ => word,
+    }
+}
+
+/// A load or store: its effective address, width in bytes, and whether it
+/// stores. lwl/lwr/swl/swr count as 4-byte accesses at the unaligned address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Access {
+    pub addr: u32,
+    pub size: u32,
+    pub store: bool,
+}
+
+/// The memory access `insn` makes with the registers as they were before it
+/// ran, if it is a load or store.
+pub fn mem_access(insn: u32, regs: &[u32; NUM_REGS]) -> Option<Access> {
+    let op = insn >> 26;
+    let (size, store) = match op {
+        0x20 | 0x24 => (1, false),
+        0x21 | 0x25 => (2, false),
+        0x22 | 0x23 | 0x26 | 0x30..=0x33 => (4, false),
+        0x28 => (1, true),
+        0x29 => (2, true),
+        0x2a | 0x2b | 0x2e | 0x38..=0x3b => (4, true),
+        _ => return None,
+    };
+    let addr = reg(regs, field(insn, 21, 5)).wrapping_add_signed(simm(insn));
+    Some(Access { addr, size, store })
+}
+
 /// Kind of memory at an address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
@@ -135,6 +303,14 @@ pub fn region(addr: u32) -> Option<(Region, u32)> {
         let off = phys.checked_sub(start)?;
         (off < len && (uncached || !kseg1)).then(|| (kind, len.saturating_sub(off)))
     })
+}
+
+/// Whether the monitor can READ_MEM `len` bytes at `addr` without side
+/// effects: memory (RAM, scratchpad, ROM, EXP1), not the I/O ports, and not
+/// an unmapped address, where the read would fault inside the monitor.
+pub fn safe_to_read(addr: u32, len: u32) -> bool {
+    let io = (0x1f80_1000..0x1f80_3000).contains(&(addr & 0x1fff_ffff));
+    !io && region(addr).is_some_and(|(_, left)| len <= left)
 }
 
 pub fn is_rom(addr: u32) -> bool {
@@ -224,6 +400,71 @@ mod tests {
         assert_eq!(next_pc(PC, 0x0571_0004, &r), Next::One(PC + 8));
         // bc2t: either way
         assert_eq!(next_pc(PC, 0x4901_0004, &r).addrs(), vec![fwd, PC + 8]);
+    }
+
+    /// Expected text from `mipsel-none-elf-objdump -b binary -m mips:3000
+    /// -EL -D` (whitespace folded), with branch targets as they are for an
+    /// instruction at 0x80020000. Where the text differs, objdump's is noted.
+    #[test]
+    fn disasm_matches_objdump() {
+        let cases: [(u32, &str); 22] = [
+            (0x0000_0000, "nop"),
+            (0x0004_1080, "sll v0,a0,0x2"),
+            (0x0320_f809, "jalr t9"),
+            (0x0320_1009, "jalr v0,t9"),
+            (0x0000_000c, "syscall"),
+            (0x0004_004d, "break 0x4,0x1"),
+            (0x0080_1021, "move v0,a0"),
+            (0x0085_102b, "sltu v0,a0,a1"),
+            (0x0491_fffe, "bgezal a0,0x8001fffc"),
+            (0x0c00_4040, "jal 0x80010100"),
+            (0x1000_fffe, "b 0x8001fffc"),
+            (0x1085_fffe, "beq a0,a1,0x8001fffc"),
+            (0x1480_fffe, "bnez a0,0x8001fffc"),
+            (0x2402_fff0, "li v0,-16"),
+            (0x3082_ff00, "andi v0,a0,0xff00"),
+            (0x3c02_dead, "lui v0,0xdead"),
+            (0x4200_0010, "rfe"),
+            (0x4a18_0001, "cop2 0x180001"), // objdump: c2 0x180001
+            (0x4882_4800, "mtc2 v0,$9"),
+            (0x8c82_fffc, "lw v0,-4(a0)"),
+            (0xb882_fffc, "swr v0,-4(a0)"),
+            (0xc882_0004, "lwc2 $2,4(a0)"),
+        ];
+        for (w, want) in cases {
+            let text = disasm(0x8002_0000, w);
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(text, want, "word {w:08x}");
+        }
+        // Not R3000 instructions.
+        assert_eq!(disasm(PC, 0xfc00_0000), ".word 0xfc000000");
+        assert_eq!(disasm(PC, 0x0000_0001), ".word 0x00000001");
+    }
+
+    #[test]
+    fn memory_access_of_loads_and_stores() {
+        let r = regs(&[(4, 0x8010_0000)]);
+        let acc = |w| mem_access(w, &r);
+        assert_eq!(
+            acc(0x8c88_0001),
+            Some(Access {
+                addr: 0x8010_0001,
+                size: 4,
+                store: false
+            })
+        );
+        assert_eq!(
+            acc(0xa488_fffe),
+            Some(Access {
+                addr: 0x800f_fffe,
+                size: 2,
+                store: true
+            })
+        );
+        assert_eq!(acc(0x2082_0001), None);
+        assert!(safe_to_read(0x8001_0000, 8) && safe_to_read(0xbfc0_0000, 4));
+        assert!(!safe_to_read(0x1f80_1810, 4) && !safe_to_read(0x1fa0_0000, 4));
+        assert!(!safe_to_read(0x807f_fffc, 8));
     }
 
     #[test]

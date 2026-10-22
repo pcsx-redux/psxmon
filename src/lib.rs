@@ -4,6 +4,7 @@
 
 pub mod atcons;
 pub mod bios;
+pub mod crash;
 pub mod exe;
 pub mod frame;
 pub mod gdb;

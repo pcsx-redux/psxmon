@@ -9,9 +9,10 @@ use std::time::{Duration, Instant as StdInstant};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use gdbstub::stub::DisconnectReason;
+use psxmon::crash::{self, Symbols};
 use psxmon::gdb::MonTarget;
 use psxmon::pcdrv::{NetPolicy, PcdrvServer, Quota, parse_net_target};
-use psxmon::proto::{self, CAP_LZ4, CAP_SLOT, CAP_STOP, HELLO, STOP_EXIT};
+use psxmon::proto::{self, CAP_LZ4, CAP_SLOT, CAP_STOP, HELLO, STOP_EXIT, STOP_FAULT};
 use psxmon::session::{LoadOptions, Session, deadline_after};
 use psxmon::transport::{self, parse_tcp_port};
 use psxmon::{
@@ -97,6 +98,10 @@ struct RunArgs {
     /// exits or stops, or psxmon is interrupted.
     #[arg(long, value_name = "SECS")]
     timeout: Option<f64>,
+    /// ELF to take symbols from for a crash report (default: the program,
+    /// when it is an ELF).
+    #[arg(long, value_name = "FILE")]
+    elf: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -464,6 +469,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         pcdrv_net,
         pcdrv_net_allow,
         timeout,
+        elf,
     } = args;
     let verbose = link.verbose;
     let lz4 = !no_lz4;
@@ -471,6 +477,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         bail!("--max-match must be at least 7");
     }
     let image = exe::load(&file).with_context(|| format!("loading {}", file.display()))?;
+    let syms = symbols(elf.as_deref(), &file)?;
     let mut server = pcdrv_server(pcdrv, pcdrv_net, pcdrv_net_allow)?;
     let mut s = attach(&link).await?;
     s.verbose = verbose;
@@ -549,6 +556,9 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
                 stop.a,
                 stop.b
             );
+            if stop.reason == STOP_FAULT {
+                eprint!("{}", crash::gather(&mut s, stop).await.report(&syms));
+            }
             ExitCode::from(EXIT_STOPPED)
         }
         (None, None) => {
@@ -556,6 +566,22 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
             ExitCode::from(EXIT_TIMEOUT)
         }
     })
+}
+
+/// Symbols for a crash report: from `elf` when given (an error if it cannot
+/// be read), else from the program when it is an ELF, else none.
+fn symbols(elf: Option<&Path>, program: &Path) -> Result<Symbols> {
+    if let Some(path) = elf {
+        let file = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let syms =
+            exe::elf_symbols(&file).with_context(|| format!("symbols from {}", path.display()))?;
+        return Ok(Symbols::new(syms));
+    }
+    Ok(std::fs::read(program)
+        .ok()
+        .and_then(|f| exe::elf_symbols(&f).ok())
+        .map(Symbols::new)
+        .unwrap_or_default())
 }
 
 /// What goes in front of each line of the target's console text on a

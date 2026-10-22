@@ -5,6 +5,8 @@
 #[allow(dead_code)]
 mod sim;
 
+mod crash;
+
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
