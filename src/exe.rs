@@ -230,6 +230,9 @@ pub fn elf_symbols(file: &[u8]) -> Result<Vec<Symbol>, ExeError> {
     if !file.starts_with(b"\x7fELF") {
         return Err(ExeError::Elf("not an ELF file".into()));
     }
+    if file.get(4) != Some(&1) || file.get(5) != Some(&1) {
+        return Err(ExeError::Elf("not a 32-bit little-endian ELF".into()));
+    }
     let sections = elf_sections(file)?;
     let mut out = Vec::new();
     for symtab in sections.iter().filter(|s| s.ty == SHT_SYMTAB) {
@@ -875,6 +878,12 @@ mod tests {
         f[sym + 12] = 3;
         assert_eq!(elf_symbols(&f).expect("symbols"), vec![]);
         assert!(elf_symbols(b"PS-X EXE").is_err());
+        // ELF64 and big-endian layouts are refused, not misread.
+        for (at, v) in [(4, 2), (5, 2)] {
+            let mut g = build_elf(true);
+            g[at] = v;
+            assert!(matches!(elf_symbols(&g), Err(ExeError::Elf(_))));
+        }
     }
 
     #[test]
