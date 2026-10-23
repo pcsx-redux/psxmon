@@ -756,7 +756,7 @@ async fn cli_run(extra: &[&str], secs: u64) -> (Option<i32>, String) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn().expect("spawn psxmon");
-    let deadline = Instant::now() + Duration::from_secs(secs);
+    let deadline = deadline_after(Duration::from_secs(secs));
     loop {
         if let Some(status) = child.try_wait().expect("try_wait") {
             let mut err = String::new();
