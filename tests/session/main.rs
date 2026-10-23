@@ -713,3 +713,13 @@ async fn ping_resyncs_after_a_frame_cut_short() {
         data
     );
 }
+
+#[tokio::test]
+async fn run_returns_after_the_ack_so_detach_can_exit() {
+    // The --detach / --timeout 0 path calls `run` and exits without a
+    // `run_until_stop`. `run` must return as soon as the RUN is acked, even
+    // for a target that never stops.
+    let (mut s, stats) = attach(SimConfig::default(), Box::new(Hang)).await;
+    s.run(0x8001_0000, 0, 0x801f_fff0).await.expect("RUN acked");
+    assert_eq!(lock(&stats).cmds.last(), Some(&RUN), "RUN was the last command");
+}

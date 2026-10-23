@@ -19,7 +19,7 @@ binary is a thin command line on top of it.
     psxmon run <file> --port DEV [--baud 115200] [--fast-reload RELOAD]
                       [--lz4 | --no-lz4] [--max-match 128] [--pcdrv DIR]
                       [--pcdrv-net [--pcdrv-net-allow HOST:PORT]...]
-                      [--timeout SECS] [--elf FILE] [-v]
+                      [--timeout SECS] [--detach] [--elf FILE] [-v]
     psxmon gdb [<file>] --port DEV [--baud 115200] [--fast-reload RELOAD]
                         [--listen 127.0.0.1:3333] [--no-lz4] [--pcdrv DIR]
                         [--pcdrv-net [--pcdrv-net-allow HOST:PORT]...]
@@ -307,6 +307,10 @@ code. Other statuses: 124 means the target did not stop before `--timeout`
 (`run` has no timeout unless one is given),
 125 means a host, link or protocol error, and 126 means the target stopped
 without exiting (a fault or another breakpoint).
+
+`--detach` (or `--timeout 0`) starts the target and exits 0 as soon as the
+monitor acknowledges the run, leaving it going. PCDRV and console output
+are not served after that, so it is for fire-and-forget loads.
 
 ## Release files
 

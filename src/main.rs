@@ -98,6 +98,11 @@ struct RunArgs {
     /// exits or stops, or psxmon is interrupted.
     #[arg(long, value_name = "SECS")]
     timeout: Option<f64>,
+    /// Exit as soon as the target starts, leaving it running, instead of
+    /// waiting for it to stop. The same as `--timeout 0`. PCDRV and console
+    /// output are not served after this.
+    #[arg(long)]
+    detach: bool,
     /// ELF to take symbols from for a crash report (default: the program,
     /// when it is an ELF).
     #[arg(long, value_name = "FILE")]
@@ -233,6 +238,12 @@ fn parse_u32(s: &str) -> std::result::Result<u32, String> {
 
 fn seconds(secs: f64, what: &str) -> Result<Duration> {
     Duration::try_from_secs_f64(secs).with_context(|| format!("{what}: bad number of seconds"))
+}
+
+/// Whether `run` should start the target and exit without waiting for it to
+/// stop: `--detach`, or `--timeout 0` (fire-and-forget).
+fn detaches(detach: bool, timeout: Option<f64>) -> bool {
+    detach || timeout == Some(0.0)
 }
 
 /// With no --timeout, `run` waits for the stop in slices of this length.
@@ -469,8 +480,11 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         pcdrv_net,
         pcdrv_net_allow,
         timeout,
+        detach,
         elf,
     } = args;
+    // --timeout 0 is the fire-and-forget case, the same as --detach.
+    let detach = detaches(detach, timeout);
     let verbose = link.verbose;
     let lz4 = !no_lz4;
     if max_match < 7 {
@@ -531,6 +545,13 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     s.set_console(Some(stdout_console()));
     let limit = timeout.map(|t| seconds(t, "--timeout")).transpose()?;
     s.run(image.pc, image.gp, image.sp).await?;
+    if detach {
+        if let Some(sv) = server.as_mut() {
+            sv.close_all();
+        }
+        eprintln!("psxmon: started, target running (detached)");
+        return Ok(ExitCode::SUCCESS);
+    }
     let result = loop {
         let deadline = deadline_after(limit.unwrap_or(FOREVER_SLICE));
         let r = s.run_until_stop(deadline, server.as_mut()).await?;
@@ -913,6 +934,17 @@ mod tests {
         assert_eq!(parse_u32("0x8001_0000"), Ok(0x8001_0000));
         assert_eq!(parse_u32("4096"), Ok(4096));
         assert!(parse_u32("0x1_0000_0000").is_err());
+    }
+
+    #[test]
+    fn detach_is_the_flag_or_a_zero_timeout() {
+        assert!(detaches(true, None));
+        assert!(detaches(false, Some(0.0)));
+        assert!(detaches(true, Some(5.0)));
+        assert!(!detaches(false, None));
+        assert!(!detaches(false, Some(5.0)));
+        // A non-zero timeout is not a detach.
+        assert!(!detaches(false, Some(0.001)));
     }
 
     #[test]
