@@ -43,6 +43,12 @@ const BULK: Duration = Duration::from_secs(5);
 /// overlaps the next transfers instead of idling the link. 4 x 8 KiB covers
 /// that timer at FT232H rates; 1 (no pipelining) otherwise.
 const PIPELINE: usize = 4;
+/// Times a LOAD or WRITE_MEM is resent after the link lost or damaged a
+/// byte of it. A FIFO link with no flow control has been seen to drop about
+/// one host byte per megabyte.
+const BULK_RETRIES: usize = 3;
+/// PING time to get back in step before a resend.
+const RESYNC: Duration = Duration::from_secs(3);
 
 /// `now + d`, or far in the future if that does not fit.
 pub fn deadline_after(d: Duration) -> Instant {
@@ -428,13 +434,63 @@ impl<T: Transport> Session<T> {
         Err(e)
     }
 
+    /// Whether `e` is what a byte lost or damaged on the link looks like:
+    /// the monitor saw a bad checksum or a short frame, its reply was
+    /// damaged, or it never replied (it is still waiting for the byte).
+    fn link_damage(e: &SessionError) -> bool {
+        match e {
+            SessionError::Monitor { code, .. } => matches!(*code, E_CKSUM | E_BADLEN),
+            SessionError::Checksum(_) | SessionError::Timeout(_) => true,
+            _ => false,
+        }
+    }
+
+    /// After a bulk transfer `what` ends in `r` with `in_flight` frames
+    /// unanswered: Ok(true) to resend, once the link has been PINGed back
+    /// into step so the resend's replies are its own (every reply still in
+    /// flight comes before the PONG and is dropped with it). Otherwise the
+    /// transfer's result, as [`Session::settle`] leaves it.
+    async fn resend_or_settle(
+        &mut self,
+        r: Result<()>,
+        in_flight: usize,
+        what: &str,
+        tries: &mut usize,
+    ) -> Result<bool> {
+        let Err(e) = r else { return Ok(false) };
+        if !Self::link_damage(&e) || *tries >= BULK_RETRIES {
+            return self.settle(Err(e), in_flight, what).await.map(|()| false);
+        }
+        *tries = tries.saturating_add(1);
+        link_log(&format!("{e}: resending ({}/{BULK_RETRIES})", *tries));
+        if matches!(self.ping(RESYNC, &[]).await, Ok(true)) {
+            return Ok(true);
+        }
+        self.out_of_step = Some(what.to_owned());
+        Err(e)
+    }
+
     async fn bulk_write(&mut self, ty: u16, name: &str, addr: u32, data: &[u8]) -> Result<()> {
         u32_len(data.len(), "write length")?;
-        // Frames sent but not yet ACKed: their address and the bytes sent
-        // once they are, so progress is reported per ACK, not per send.
-        let mut pending = VecDeque::new();
-        let r = self.bulk_frames(ty, name, addr, data, &mut pending).await;
-        self.settle(r, pending.len(), name).await
+        let mut tries = 0;
+        // Bytes ACKed in order so far: a resend starts at the first chunk
+        // past them. LOAD and WRITE_MEM write the same bytes to the same
+        // place again, so resending chunks that did land costs only time.
+        let mut acked = 0;
+        loop {
+            // Frames sent but not yet ACKed: their address and the bytes sent
+            // once they are, so progress is reported per ACK, not per send.
+            let mut pending = VecDeque::new();
+            let r = self
+                .bulk_frames(ty, name, addr, data, &mut acked, &mut pending)
+                .await;
+            if !self
+                .resend_or_settle(r, pending.len(), name, &mut tries)
+                .await?
+            {
+                return Ok(());
+            }
+        }
     }
 
     async fn bulk_frames(
@@ -443,11 +499,14 @@ impl<T: Transport> Session<T> {
         name: &str,
         addr: u32,
         data: &[u8],
+        acked: &mut usize,
         pending: &mut VecDeque<(u32, usize)>,
     ) -> Result<()> {
-        let mut at = addr;
-        let mut sent: usize = 0;
-        for chunk in data.chunks(CHUNK_BYTES) {
+        let mut sent: usize = *acked;
+        // `acked` is a multiple of CHUNK_BYTES below `data.len()`, or equal
+        // to it; addresses wrap as below.
+        let mut at = addr.wrapping_add(u32_len(sent, "write length")?);
+        for chunk in data.get(sent..).unwrap_or_default().chunks(CHUNK_BYTES) {
             let n = u32_len(chunk.len(), "chunk")?;
             let mut payload = u32_words(&[at, n]);
             payload.extend(bytes_to_words(chunk));
@@ -459,6 +518,7 @@ impl<T: Transport> Session<T> {
             {
                 self.expect_ack(|| format!("{name} at 0x{a:08x}"), BULK)
                     .await?;
+                *acked = done;
                 if ty == LOAD {
                     self.report_progress(done, data.len());
                 }
@@ -470,6 +530,7 @@ impl<T: Transport> Session<T> {
         while let Some((a, done)) = pending.pop_front() {
             self.expect_ack(|| format!("{name} at 0x{a:08x}"), BULK)
                 .await?;
+            *acked = done;
             if ty == LOAD {
                 self.report_progress(done, data.len());
             }
@@ -484,12 +545,22 @@ impl<T: Transport> Session<T> {
     pub async fn load_lz4(&mut self, addr: u32, raw_len: usize, comp: &[u8]) -> Result<()> {
         let raw_len = u32_len(raw_len, "LZ4 raw length")?;
         let clen = u32_len(comp.len(), "LZ4 block")?;
-        // Frames sent but not yet ACKed: their offset and length.
-        let mut pending = VecDeque::new();
-        let r = self
-            .lz4_frames(addr, raw_len, clen, comp, &mut pending)
-            .await;
-        self.settle(r, pending.len(), "LZ4 LOAD").await
+        let mut tries = 0;
+        loop {
+            // Frames sent but not yet ACKed: their offset and length.
+            let mut pending = VecDeque::new();
+            let r = self
+                .lz4_frames(addr, raw_len, clen, comp, &mut pending)
+                .await;
+            // The monitor drops an LZ4 stream on any error, so a resend
+            // starts it again at offset 0.
+            if !self
+                .resend_or_settle(r, pending.len(), "LZ4 LOAD", &mut tries)
+                .await?
+            {
+                return Ok(());
+            }
+        }
     }
 
     async fn lz4_frames(

@@ -198,6 +198,9 @@ pub struct SimConfig {
     pub ram_size: usize,
     /// The RAM_SIZE register's value at start.
     pub ram_size_reg: u32,
+    /// Host bytes lost on the way in, by position in the stream the sim
+    /// reads (0 = the first byte), as a FIFO read that misses one would.
+    pub drop_host_bytes: Vec<usize>,
 }
 
 impl Default for SimConfig {
@@ -212,6 +215,7 @@ impl Default for SimConfig {
             rom: Vec::new(),
             ram_size: RAM_SIZE,
             ram_size_reg: RAM_SIZE_BIOS,
+            drop_host_bytes: Vec::new(),
         }
     }
 }
@@ -251,6 +255,8 @@ pub struct Sim {
     program: Box<dyn Program>,
     lz: Lz4State,
     stats: Arc<Mutex<SimStats>>,
+    /// Host bytes read so far, for `SimConfig::drop_host_bytes`.
+    rx_seen: usize,
 }
 
 impl Sim {
@@ -289,6 +295,7 @@ impl Sim {
             program,
             lz: Lz4State::default(),
             stats: stats.clone(),
+            rx_seen: 0,
         };
         (sim, stats)
     }
@@ -313,6 +320,11 @@ impl Sim {
         loop {
             if let Some(b) = self.rx.pop_front() {
                 if self.in_sync() {
+                    let at = self.rx_seen;
+                    self.rx_seen = at.saturating_add(1);
+                    if self.cfg.drop_host_bytes.contains(&at) {
+                        continue;
+                    }
                     return Some(b);
                 }
                 continue;

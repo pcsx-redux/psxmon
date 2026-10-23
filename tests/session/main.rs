@@ -643,7 +643,7 @@ where
 #[tokio::test]
 async fn failed_pipelined_write_leaves_no_stale_ack() {
     let (mut s, seen) = attach_scripted(|ty, nth| match ty {
-        WRITE_MEM if nth == 0 => Some((ERROR, vec![E_CKSUM])),
+        WRITE_MEM if nth == 0 => Some((ERROR, vec![E_BADADDR])),
         WRITE_MEM => Some((ACK, vec![])),
         _ => Some((ERROR, vec![E_BADSTATE])),
     })
@@ -669,7 +669,7 @@ async fn failed_pipelined_write_leaves_no_stale_ack() {
 #[tokio::test]
 async fn unaccounted_pipelined_replies_poison_the_session() {
     let (mut s, seen) = attach_scripted(|ty, nth| match ty {
-        WRITE_MEM if nth == 0 => Some((ERROR, vec![E_CKSUM])),
+        WRITE_MEM if nth == 0 => Some((ERROR, vec![E_BADADDR])),
         WRITE_MEM if nth == 1 => Some((ACK, vec![])),
         // The last two replies are lost.
         WRITE_MEM => None,
@@ -785,4 +785,106 @@ async fn cli_detach_exits_0_after_the_ack() {
     // Control: without it, a target that never stops runs into --timeout.
     let (code, err) = cli_run(&["--timeout", "1"], 20).await;
     assert_eq!(code, Some(124), "{err}");
+}
+
+/// Bytes on the wire of one full plain LOAD chunk, and of the PING that
+/// `attach` sends first.
+const LOAD_FRAME_BYTES: usize = 7 + 8 + 8192 + 4;
+const PING_FRAME_BYTES: usize = 11;
+
+/// One host byte lost inside the second of five pipelined LOAD chunks, as
+/// on an FT232H cart: that chunk takes the next frame's first byte for its
+/// checksum and fails ECKSUM, and the next chunk, missing its frame start,
+/// gets no reply at all. psxmon resynchronises and resends from the failed
+/// chunk on.
+#[tokio::test]
+async fn a_byte_lost_in_a_pipelined_load_is_resent() {
+    let cfg = SimConfig {
+        caps: CAP_PIPELINE,
+        drop_host_bytes: vec![PING_FRAME_BYTES + LOAD_FRAME_BYTES + 3000],
+        ..Default::default()
+    };
+    let (mut s, stats) = attach(cfg, Box::new(Hang)).await;
+    let data = program_text(4 * 8192 + 19);
+    s.load_raw(0x8001_0000, &data).await.expect("LOAD resent");
+    {
+        let st = lock(&stats);
+        assert_eq!(st.errors_sent, vec![E_CKSUM]);
+        // 1 + the lost-and-failed pair + their resends + 3 after them.
+        assert_eq!(st.plain_load_frames, 8, "{st:?}");
+    }
+    assert_eq!(
+        s.read_mem(0x8001_0000, len32(&data))
+            .await
+            .expect("READ_MEM"),
+        data
+    );
+}
+
+/// The same loss in the last chunk: the monitor waits for one more byte
+/// and never replies, so the resend follows the reply timeout.
+#[tokio::test]
+async fn a_byte_lost_in_the_last_chunk_is_resent() {
+    let cfg = SimConfig {
+        caps: CAP_PIPELINE,
+        drop_host_bytes: vec![PING_FRAME_BYTES + 2 * LOAD_FRAME_BYTES + 5],
+        ..Default::default()
+    };
+    let (mut s, stats) = attach(cfg, Box::new(Hang)).await;
+    let data = program_text(2 * 8192 + 19);
+    s.load_raw(0x8001_0000, &data).await.expect("LOAD resent");
+    assert_eq!(lock(&stats).errors_sent, vec![E_CKSUM]);
+    assert_eq!(
+        s.read_mem(0x8001_0000, len32(&data))
+            .await
+            .expect("READ_MEM"),
+        data
+    );
+}
+
+/// A byte lost inside an LZ4 slice: the monitor drops the stream, so the
+/// whole block goes again from offset 0.
+#[tokio::test]
+async fn a_byte_lost_in_an_lz4_load_restarts_the_stream() {
+    let cfg = SimConfig {
+        caps: CAP_LZ4 | CAP_PIPELINE,
+        drop_host_bytes: vec![PING_FRAME_BYTES + 8300],
+        ..Default::default()
+    };
+    let (mut s, stats) = attach(cfg, Box::new(Hang)).await;
+    let data = program_text(200_000);
+    let st = s
+        .load(0x8001_0000, &data, &LoadOptions::default())
+        .await
+        .expect("LZ4 LOAD resent");
+    assert!(st.lz4_bytes.is_some(), "sent as LZ4");
+    assert_eq!(lock(&stats).errors_sent.first(), Some(&E_CKSUM));
+    assert_eq!(
+        s.read_mem(0x8001_0000, len32(&data))
+            .await
+            .expect("READ_MEM"),
+        data
+    );
+}
+
+/// A link that damages every LOAD: the resends stop and the error stands.
+#[tokio::test]
+async fn resends_give_up_on_a_link_that_keeps_failing() {
+    let (mut s, seen) = attach_scripted(|ty, _| match ty {
+        LOAD => Some((ERROR, vec![E_CKSUM])),
+        _ => Some((ACK, vec![])),
+    })
+    .await;
+    let e = s
+        .load_raw(0x8001_0000, &[0u8; 8192])
+        .await
+        .expect_err("keeps failing");
+    assert!(e.to_string().contains("ECKSUM"), "{e}");
+    let loads = seen
+        .lock()
+        .expect("script log")
+        .iter()
+        .filter(|&&t| t == LOAD)
+        .count();
+    assert_eq!(loads, 4, "the first try and three resends");
 }
