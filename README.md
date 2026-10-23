@@ -19,7 +19,7 @@ binary is a thin command line on top of it.
     psxmon run <file> --port DEV [--baud 115200] [--fast-reload RELOAD]
                       [--lz4 | --no-lz4] [--max-match 128] [--pcdrv DIR]
                       [--pcdrv-net [--pcdrv-net-allow HOST:PORT]...]
-                      [--timeout SECS] [-v]
+                      [--timeout SECS] [--elf FILE] [-v]
     psxmon gdb [<file>] --port DEV [--baud 115200] [--fast-reload RELOAD]
                         [--listen 127.0.0.1:3333] [--no-lz4] [--pcdrv DIR]
                         [--pcdrv-net [--pcdrv-net-allow HOST:PORT]...]
@@ -268,6 +268,36 @@ Use it with `gdb-multiarch` or any `mips` gdb:
   on the branch (see PROTOCOL.md, section 13). With `--real-step`, a step
   of a branch to itself is reported done without running it. The R3000A has no FPU; gdb's
   FP registers read as 0 and writes to them are dropped.
+
+## Crash reports
+
+When the program under `psxmon run` takes an exception the monitor traps
+(AdEL, AdES, IBE, DBE, RI, CpU, Ov), psxmon prints the stop line and then a
+report read from the halted target: what the exception means, BadVaddr, the
+faulting instruction disassembled and the address it accessed, the branch
+when the fault is in a delay slot, every register the monitor returns, and
+the top of the stack. Addresses are named from the program's symbols when
+it is an ELF, or from `--elf FILE` (for a PS-EXE built from that ELF).
+
+    psxmon: target stopped: fault at 0x80010004, a=0x00000004 b=0x80100001
+      cause:   AdEL (ExcCode 4): address error on a load or an instruction fetch: ...
+      address: 0x80100001 (BadVaddr)
+      pc:      0x80010008 <main+0x8>  lw      t0,1(a0)
+      access:  4-byte load from 0x80100001
+      in the delay slot of the branch at 0x80010004 <main+0x4>  jal     0x80010100
+      ra:      0x8001000c <main+0xc>   sp: 0x801fff00
+      registers:
+       zero 00000000     at 00000000     v0 00000000     v1 00000000
+       ...
+         sr 40000404     lo 00000000     hi 00000000    bad 80100001
+      cause 80000010    epc 80010004
+      stack at 0x801fff00:
+        0x801fff00: 00000000
+        ...
+
+Only memory is read for the report, never I/O ports or unmapped addresses.
+A bus error (IBE, DBE) leaves BadVaddr unset, so the access line is the
+only place its address shows.
 
 ## Exit status
 
