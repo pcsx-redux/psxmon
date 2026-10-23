@@ -721,5 +721,68 @@ async fn run_returns_after_the_ack_so_detach_can_exit() {
     // for a target that never stops.
     let (mut s, stats) = attach(SimConfig::default(), Box::new(Hang)).await;
     s.run(0x8001_0000, 0, 0x801f_fff0).await.expect("RUN acked");
-    assert_eq!(lock(&stats).cmds.last(), Some(&RUN), "RUN was the last command");
+    assert_eq!(
+        lock(&stats).cmds.last(),
+        Some(&RUN),
+        "RUN was the last command"
+    );
+}
+
+/// Run the psxmon binary's `run` against a sim behind a TCP port, with the
+/// given extra arguments; the exit status, stderr, and whether it finished
+/// within `secs`.
+async fn cli_run(extra: &[&str], secs: u64) -> (Option<i32>, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (host, _) = sim::start(SimConfig::default(), Box::new(Hang));
+    tokio::spawn(async move {
+        let (mut conn, _) = listener.accept().await.expect("accept");
+        let mut host = host;
+        let _ = tokio::io::copy_bidirectional(&mut conn, &mut host).await;
+    });
+    let dir = tempfile::tempdir().expect("tempdir");
+    let exe_path = dir.path().join("hang.exe");
+    let file =
+        exe::build_ps_exe(&[0; 16], 0x8001_0000, 0x8001_0000, 0, 0x801f_0000).expect("PS-EXE");
+    std::fs::write(&exe_path, file).expect("write PS-EXE");
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_psxmon"));
+    cmd.arg("run")
+        .arg(&exe_path)
+        .arg("--port")
+        .arg(format!("tcp:127.0.0.1:{port}"))
+        .args(extra)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn psxmon");
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                use std::io::Read;
+                let _ = e.read_to_string(&mut err);
+            }
+            return (status.code(), err);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (None, String::new());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn cli_detach_exits_0_after_the_ack() {
+    for args in [&["--detach"][..], &["--timeout", "0"][..]] {
+        let (code, err) = cli_run(args, 20).await;
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        assert!(err.contains("detached"), "{args:?}: {err}");
+    }
+    // Control: without it, a target that never stops runs into --timeout.
+    let (code, err) = cli_run(&["--timeout", "1"], 20).await;
+    assert_eq!(code, Some(124), "{err}");
 }
