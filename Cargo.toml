@@ -29,7 +29,7 @@ libc = "0.2"
 
 # Console mode for escape sequences on Windows.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Console"] }
 
 [dev-dependencies]
 lz4_flex = "0.11"

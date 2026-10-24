@@ -77,8 +77,11 @@ pub trait Transport: AsyncRead + AsyncWrite + Unpin + Send {
 /// command queue again: the most a write waits on an idle link.
 const POLL: Duration = Duration::from_millis(2);
 
-/// The most the I/O thread writes before it drains what has arrived.
-const WRITE_CHUNK: usize = 256;
+/// The most the I/O thread writes before it drains what has arrived. Picked
+/// by loading a 1.8 MB PS-EXE over an FT232H: on Linux a whole bulk frame
+/// per write is 13% faster than 256 or 4096 bytes; on Windows 256 is the
+/// fastest of the three.
+const WRITE_CHUNK: usize = if cfg!(windows) { 256 } else { 16384 };
 
 enum Cmd {
     Write(Vec<u8>),
@@ -114,6 +117,7 @@ impl SerialTransport {
             .open()
             .map_err(io::Error::from)?;
         link_log(&format!("opened {path} at {baud} baud"));
+        fine_timer();
         raise_modem_lines(&mut port, "after open");
         port.clear(serialport::ClearBuffer::All)
             .map_err(io::Error::from)?;
@@ -145,6 +149,27 @@ impl SerialTransport {
             .ok_or_else(closed)
     }
 }
+
+/// Ask Windows for 1 ms timer ticks for the rest of the process. At its
+/// default 15.6 ms tick the I/O thread's [`POLL`] read timeout lasts a whole
+/// tick, and each bulk frame waits that long behind it: loads over an
+/// FT232H ran at ~530 kB/s with the default tick and ~990 kB/s with this.
+#[cfg(windows)]
+fn fine_timer() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: a plain Win32 call with no pointers; the request ends with
+        // the process.
+        let r = unsafe { windows_sys::Win32::Media::timeBeginPeriod(1) };
+        link_log(&format!(
+            "timer period 1 ms: {}",
+            if r == 0 { "set" } else { "refused" }
+        ));
+    });
+}
+
+#[cfg(not(windows))]
+fn fine_timer() {}
 
 /// The PS1 transmits only while the host holds RTS up (its CTS). On Windows
 /// every SetCommState, which a rate change goes through, re-applies the
