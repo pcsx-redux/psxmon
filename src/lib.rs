@@ -4,6 +4,7 @@
 
 pub mod atcons;
 pub mod bios;
+pub mod console;
 pub mod crash;
 pub mod exe;
 pub mod frame;
@@ -15,6 +16,7 @@ pub mod mips;
 pub mod pcdrv;
 pub mod proto;
 pub mod ram;
+pub mod rate;
 pub mod session;
 pub mod stepsim;
 pub mod transport;

@@ -4,15 +4,18 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant as StdInstant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use gdbstub::stub::DisconnectReason;
+use psxmon::console::ConsoleLines;
 use psxmon::crash::{self, Symbols};
 use psxmon::gdb::MonTarget;
 use psxmon::pcdrv::{NetPolicy, PcdrvServer, Quota, parse_net_target};
 use psxmon::proto::{self, CAP_LZ4, CAP_SLOT, CAP_STOP, HELLO, STOP_EXIT, STOP_FAULT};
+use psxmon::rate::RateMeter;
 use psxmon::session::{LoadOptions, Session, deadline_after};
 use psxmon::transport::{self, parse_tcp_port};
 use psxmon::{
@@ -504,21 +507,40 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     // whose own lines would break it up.
     let show_progress = std::io::stderr().is_terminal() && !verbose;
     let t0 = StdInstant::now();
+    let meter = Arc::new(Mutex::new(RateMeter::default()));
+    // Bytes on the link before this segment, and in all of them.
+    let mut link_base: usize = 0;
+    let mut image_bytes: usize = 0;
+    let mut any_lz4 = false;
     let nsegs = image.segments.len();
     for (i, seg) in image.segments.iter().enumerate() {
-        if show_progress {
+        let mut show = show_progress.then(|| {
             let what = if nsegs > 1 {
                 format!("0x{:08x} ({}/{nsegs})", seg.addr, i.saturating_add(1))
             } else {
                 format!("0x{:08x}", seg.addr)
             };
-            s.progress = Some(progress_line(what));
-        }
+            progress_line(what)
+        });
+        let m = Arc::clone(&meter);
+        let base = link_base;
+        s.progress = Some(Box::new(move |sent: usize, total: usize| {
+            m.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .record(t0.elapsed(), base.saturating_add(sent));
+            if let Some(p) = show.as_mut() {
+                p(sent, total);
+            }
+        }));
         let st = s.load(seg.addr, &seg.data, &opts).await;
-        if s.progress.take().is_some() {
+        s.progress = None;
+        if show_progress {
             clear_line();
         }
         let st = st?;
+        link_base = link_base.saturating_add(st.lz4_bytes.unwrap_or(st.bytes));
+        image_bytes = image_bytes.saturating_add(st.bytes);
+        any_lz4 |= st.lz4_bytes.is_some();
         if verbose {
             let how = st
                 .lz4_bytes
@@ -529,6 +551,16 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
             );
         }
     }
+    eprintln!(
+        "{}",
+        load_summary(
+            image_bytes,
+            link_base,
+            any_lz4,
+            t0.elapsed(),
+            &meter.lock().unwrap_or_else(PoisonError::into_inner)
+        )
+    );
     if verbose {
         eprintln!(
             "psxmon: load took {} ms {}; run pc=0x{:08x} gp=0x{:08x} sp=0x{:08x}",
@@ -605,54 +637,45 @@ fn symbols(elf: Option<&Path>, program: &Path) -> Result<Symbols> {
         .unwrap_or_default())
 }
 
-/// What goes in front of each line of the target's console text on a
-/// terminal, to tell it from psxmon's own messages.
-const TTY_PREFIX: &[u8] = b"PSX> ";
+/// The target's console text as it goes to stdout, shared with
+/// [`end_console_line`].
+static CONSOLE: Mutex<Option<ConsoleLines>> = Mutex::new(None);
+
+fn write_stdout(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(bytes);
+    let _ = out.flush();
+}
 
 /// The target's console text to stdout: raw when stdout is piped, so logs
 /// and expected-output files see exactly the target's bytes, and with
-/// [`TTY_PREFIX`] on each line when it is a terminal.
+/// [`psxmon::console::TTY_PREFIX`] on each line when it is a terminal. Under `-v`, whole
+/// lines only, so link lines never land inside one.
 fn stdout_console() -> psxmon::session::Console {
-    let mut line_start = std::io::stdout().is_terminal().then_some(true);
-    Box::new(move |bytes: &[u8]| {
-        let mut out = std::io::stdout().lock();
-        let _ = match line_start.as_mut() {
-            Some(at) => {
-                let r = out.write_all(&prefix_lines(bytes, at));
-                MID_LINE.store(!*at, Ordering::Relaxed);
-                r
-            }
-            None => out.write_all(bytes),
-        };
-        let _ = out.flush();
+    let lines = ConsoleLines::new(std::io::stdout().is_terminal(), transport::link_log_on());
+    *CONSOLE.lock().unwrap_or_else(PoisonError::into_inner) = Some(lines);
+    Box::new(|bytes: &[u8]| {
+        let out = CONSOLE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+            .map(|c| c.feed(bytes));
+        write_stdout(&out.unwrap_or_default());
     })
 }
 
-/// On a terminal, whether the target's text stopped mid-line.
-static MID_LINE: AtomicBool = AtomicBool::new(false);
-
-/// Finish a line the target left open on the terminal, so psxmon's closing
+/// Write out what the target's text left held or open, so psxmon's closing
 /// message starts on a line of its own.
 fn end_console_line() {
-    if MID_LINE.swap(false, Ordering::Relaxed) {
-        let mut out = std::io::stdout().lock();
-        let _ = out.write_all(b"\n");
-        let _ = out.flush();
-    }
-}
-
-/// `bytes` with [`TTY_PREFIX`] before each line start; `at_start` carries
-/// whether the next byte begins a line from one call to the next.
-fn prefix_lines(bytes: &[u8], at_start: &mut bool) -> Vec<u8> {
-    let mut v = Vec::with_capacity(bytes.len().saturating_add(TTY_PREFIX.len()));
-    for &b in bytes {
-        if *at_start {
-            v.extend_from_slice(TTY_PREFIX);
-        }
-        v.push(b);
-        *at_start = b == b'\n';
-    }
-    v
+    let out = CONSOLE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_mut()
+        .map(ConsoleLines::finish);
+    write_stdout(&out.unwrap_or_default());
 }
 
 /// Whether stderr takes escape sequences. Always on outside Windows; on
@@ -699,6 +722,29 @@ fn clear_line() {
     } else {
         eprint!("\r{:PLAIN_WIDTH$}\r", "");
     }
+}
+
+/// The line printed after every load: what went over, how long it took, and
+/// the link's average and peak rates (wire bytes, so compressed under LZ4).
+fn load_summary(
+    image_bytes: usize,
+    link_bytes: usize,
+    lz4: bool,
+    took: Duration,
+    meter: &RateMeter,
+) -> String {
+    let kbs = |r: Option<f64>| r.map_or("-".to_string(), |r| format!("{:.0}", r / 1000.0));
+    let link = if lz4 {
+        format!(" ({link_bytes} on the link with LZ4)")
+    } else {
+        String::new()
+    };
+    format!(
+        "psxmon: loaded {image_bytes} bytes{link} in {} ms: {} kB/s average, {} kB/s peak",
+        took.as_millis(),
+        kbs(meter.average()),
+        kbs(meter.peak())
+    )
 }
 
 /// A progress callback that redraws one stderr line for the upload of
@@ -945,17 +991,5 @@ mod tests {
         assert!(!detaches(false, Some(5.0)));
         // A non-zero timeout is not a detach.
         assert!(!detaches(false, Some(0.001)));
-    }
-
-    #[test]
-    fn prefix_lines_marks_each_line_start_across_calls() {
-        let mut at = true;
-        assert_eq!(prefix_lines(b"a\nb", &mut at), b"PSX> a\nPSX> b");
-        assert!(!at);
-        assert_eq!(prefix_lines(b"c\n", &mut at), b"c\n");
-        assert!(at);
-        assert_eq!(prefix_lines(b"\n\n", &mut at), b"PSX> \nPSX> \n");
-        assert_eq!(prefix_lines(b"", &mut at), b"");
-        assert!(at);
     }
 }

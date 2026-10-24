@@ -787,6 +787,29 @@ async fn cli_detach_exits_0_after_the_ack() {
     assert_eq!(code, Some(124), "{err}");
 }
 
+/// Every load ends in a line that stays on screen, without -v too, so a
+/// user's report carries the measured rate.
+#[tokio::test]
+async fn cli_prints_a_load_summary_without_verbose() {
+    // The PS-EXE's 16 bytes of code are padded to 2048.
+    for (extra, lz4) in [
+        (&["--detach"][..], true),
+        (&["--detach", "--no-lz4"][..], false),
+    ] {
+        let (code, err) = cli_run(extra, 20).await;
+        assert_eq!(code, Some(0), "{err}");
+        let line = err
+            .lines()
+            .find(|l| l.starts_with("psxmon: loaded 2048 bytes"))
+            .unwrap_or_else(|| panic!("{extra:?}: no summary in {err}"));
+        assert!(
+            line.contains(" ms: ") && line.contains("kB/s average") && line.contains("kB/s peak"),
+            "{line}"
+        );
+        assert_eq!(line.contains("on the link with LZ4"), lz4, "{line}");
+    }
+}
+
 /// Bytes on the wire of one full plain LOAD chunk, and of the PING that
 /// `attach` sends first.
 const LOAD_FRAME_BYTES: usize = 7 + 8 + 8192 + 4;
