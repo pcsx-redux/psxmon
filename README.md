@@ -46,8 +46,10 @@ or `0x` hex.
 - `run` loads a program, starts it, and copies its console text to stdout.
   On a terminal each line of that text starts with `PSX> `; piped, it is
   the target's bytes unchanged. psxmon's own messages go to stderr: an
-  upload progress line when stderr is a terminal, and one line per PCDRV
-  open, close or failed call. It serves `break 0, 0x101..0x107` PCDRV calls
+  upload progress line when stderr is a terminal, a line after the load
+  with its size, time, and average and peak rate, and one line per PCDRV
+  open, close or failed call. With `-v`, which logs the link's traffic to
+  stderr, the target's text goes to stdout a whole line at a time. It serves `break 0, 0x101..0x107` PCDRV calls
   from `--pcdrv DIR`, jailed to that directory. With neither `--pcdrv` nor
   `--pcdrv-net`, every PCDRV call fails with -1. The run ends when the
   program executes `break 4, 0`, with its exit code in `a0`.
