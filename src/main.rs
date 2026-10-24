@@ -925,6 +925,8 @@ fn main() -> ExitCode {
             .map_err(anyhow::Error::from)
             .and_then(|rt| rt.block_on(dispatch(cmd))),
     };
+    // Text the target left held or open, whichever way the command ended.
+    end_console_line();
     result.unwrap_or_else(|e| {
         eprintln!("psxmon: {e:#}");
         ExitCode::from(EXIT_ERROR)

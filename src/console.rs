@@ -38,14 +38,22 @@ impl ConsoleLines {
             return self.emit(bytes);
         }
         self.held.extend_from_slice(bytes);
-        let upto = if self.held.len() > HOLD_MAX {
+        // Complete lines go out; the open line after them only once it
+        // outgrows HOLD_MAX.
+        let done = self
+            .held
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |i| i.saturating_add(1));
+        let open = self.held.len().saturating_sub(done);
+        let upto = if open > HOLD_MAX {
             self.held.len()
         } else {
-            match self.held.iter().rposition(|&b| b == b'\n') {
-                Some(i) => i.saturating_add(1),
-                None => return Vec::new(),
-            }
+            done
         };
+        if upto == 0 {
+            return Vec::new();
+        }
         let rest = self.held.split_off(upto);
         let line = std::mem::replace(&mut self.held, rest);
         self.emit(&line)
@@ -132,5 +140,13 @@ mod tests {
         assert_eq!(c.feed(&long), b"");
         assert_eq!(c.feed(b"y"), [long.as_slice(), b"y"].concat());
         assert_eq!(c.finish(), b"");
+    }
+
+    #[test]
+    fn hold_keeps_a_short_open_line_after_a_long_batch() {
+        let mut c = ConsoleLines::new(false, true);
+        let lines = b"a\n".repeat(HOLD_MAX);
+        assert_eq!(c.feed(&[lines.as_slice(), b"b"].concat()), lines);
+        assert_eq!(c.finish(), b"b");
     }
 }

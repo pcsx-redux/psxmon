@@ -104,6 +104,7 @@ pub struct SerialTransport {
     flush: Option<oneshot::Receiver<()>>,
     thread: Option<JoinHandle<()>>,
     baud: u32,
+    _timer: FineTimer,
 }
 
 impl SerialTransport {
@@ -117,7 +118,6 @@ impl SerialTransport {
             .open()
             .map_err(io::Error::from)?;
         link_log(&format!("opened {path} at {baud} baud"));
-        fine_timer();
         raise_modem_lines(&mut port, "after open");
         port.clear(serialport::ClearBuffer::All)
             .map_err(io::Error::from)?;
@@ -139,6 +139,7 @@ impl SerialTransport {
             flush: None,
             thread: Some(thread),
             baud,
+            _timer: FineTimer::new(),
         })
     }
 
@@ -150,26 +151,45 @@ impl SerialTransport {
     }
 }
 
-/// Ask Windows for 1 ms timer ticks for the rest of the process. At its
-/// default 15.6 ms tick the I/O thread's [`POLL`] read timeout lasts a whole
-/// tick, and each bulk frame waits that long behind it: loads over an
-/// FT232H ran at ~530 kB/s with the default tick and ~990 kB/s with this.
-#[cfg(windows)]
-fn fine_timer() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: a plain Win32 call with no pointers; the request ends with
-        // the process.
+/// 1 ms Windows timer ticks while a serial port is open. At the default
+/// 15.6 ms tick the I/O thread's [`POLL`] read timeout lasts a whole tick,
+/// and each bulk frame waits that long behind it: loads over an FT232H ran
+/// at ~530 kB/s with the default tick and ~990 kB/s with this. Nothing on
+/// other systems.
+struct FineTimer {
+    #[cfg(windows)]
+    set: bool,
+}
+
+impl FineTimer {
+    #[cfg(windows)]
+    fn new() -> Self {
+        // SAFETY: a plain Win32 call with no pointers, undone in Drop.
         let r = unsafe { windows_sys::Win32::Media::timeBeginPeriod(1) };
         link_log(&format!(
             "timer period 1 ms: {}",
             if r == 0 { "set" } else { "refused" }
         ));
-    });
+        FineTimer { set: r == 0 }
+    }
+
+    #[cfg(not(windows))]
+    fn new() -> Self {
+        FineTimer {}
+    }
 }
 
-#[cfg(not(windows))]
-fn fine_timer() {}
+#[cfg(windows)]
+impl Drop for FineTimer {
+    fn drop(&mut self) {
+        if self.set {
+            // SAFETY: ends the request `new` made.
+            unsafe {
+                windows_sys::Win32::Media::timeEndPeriod(1);
+            }
+        }
+    }
+}
 
 /// The PS1 transmits only while the host holds RTS up (its CTS). On Windows
 /// every SetCommState, which a rate change goes through, re-applies the

@@ -37,19 +37,15 @@ impl RateMeter {
     /// two points; the average when the whole upload is shorter than that.
     pub fn peak(&self) -> Option<f64> {
         let mut best: Option<f64> = None;
-        let mut j = 0;
         for (i, &(ti, ni)) in self.points.iter().enumerate() {
-            j = j.max(i);
-            while let Some(&(tj, _)) = self.points.get(j)
-                && tj.saturating_sub(ti) < PEAK_SPAN
-            {
-                j = j.saturating_add(1);
-            }
-            let Some(&(tj, nj)) = self.points.get(j) else {
-                break;
-            };
-            if let Some(r) = per_second(nj.saturating_sub(ni), tj.saturating_sub(ti)) {
-                best = Some(best.map_or(r, |b| b.max(r)));
+            for &(tj, nj) in self.points.iter().skip(i) {
+                let span = tj.saturating_sub(ti);
+                if span < PEAK_SPAN {
+                    continue;
+                }
+                if let Some(r) = per_second(nj.saturating_sub(ni), span) {
+                    best = Some(best.map_or(r, |b| b.max(r)));
+                }
             }
         }
         best.or_else(|| self.average())
@@ -96,8 +92,19 @@ mod tests {
         // Two ACKs 1 ms apart: 8 MB/s between them, not over PEAK_SPAN.
         m.record(ms(301), 38_000);
         m.record(ms(600), 60_000);
+        // 0 to 301 ms is the fastest stretch long enough: about 126 kB/s.
         let peak = m.peak().expect("peak");
-        assert!(peak < 110_000.0, "{peak}");
+        assert!((126_000.0..127_000.0).contains(&peak), "{peak}");
+    }
+
+    #[test]
+    fn peak_looks_past_the_first_point_far_enough_away() {
+        let mut m = RateMeter::default();
+        m.record(ms(250), 100);
+        m.record(ms(251), 100_000);
+        let peak = m.peak().expect("peak");
+        let avg = m.average().expect("average");
+        assert!(peak >= avg, "{peak} < {avg}");
     }
 
     #[test]
