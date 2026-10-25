@@ -14,7 +14,9 @@ use psxmon::console::ConsoleLines;
 use psxmon::crash::{self, Symbols};
 use psxmon::gdb::MonTarget;
 use psxmon::pcdrv::{NetPolicy, PcdrvServer, Quota, parse_net_target};
-use psxmon::proto::{self, CAP_LZ4, CAP_SLOT, CAP_STOP, CAP_WATCHDOG, HELLO, STOP_EXIT, STOP_FAULT};
+use psxmon::proto::{
+    self, CAP_LZ4, CAP_SLOT, CAP_STOP, CAP_WATCHDOG, HELLO, STOP_EXIT, STOP_FAULT,
+};
 use psxmon::rate::RateMeter;
 use psxmon::session::{LoadOptions, Session, deadline_after};
 use psxmon::transport::{self, parse_tcp_port};
