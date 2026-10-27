@@ -10,17 +10,18 @@ use std::time::Duration;
 
 use serialport::{SerialPortInfo, SerialPortType};
 use thiserror::Error;
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout_at};
 
-use crate::session::Session;
+use crate::session::{Session, deadline_after};
 use crate::transport::SerialTransport;
 
 /// FTDI's USB vendor id.
 pub const FTDI_VID: u16 = 0x0403;
 
-/// Once one port has answered, how long from the start of the probe the
-/// others still get to answer, so that two monitors are reported as two.
+/// Once one port has answered, how much longer the others get to answer,
+/// so that two monitors are reported as two.
 pub const SETTLE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -85,12 +86,30 @@ pub fn choose(baud: u32, results: &[(String, Outcome)]) -> Result<String, ProbeE
 }
 
 async fn ping_port(name: String, baud: u32, wait: Duration) -> (String, Outcome) {
-    let io = match SerialTransport::open(&name, baud) {
-        Ok(io) => io,
-        Err(e) => return (name, Outcome::Failed(e.to_string())),
+    let deadline = deadline_after(wait);
+    // Opening blocks, and the runtime has one thread: open on a thread of
+    // its own, so a port that hangs in open cannot hold up the others or
+    // the deadline. A port that opens after the deadline is closed again
+    // when the thread's send fails.
+    let (tx, rx) = oneshot::channel();
+    let path = name.clone();
+    let spawned = std::thread::Builder::new()
+        .name("probe-open".into())
+        .spawn(move || {
+            let _ = tx.send(SerialTransport::open(&path, baud));
+        });
+    if let Err(e) = spawned {
+        return (name, Outcome::Failed(e.to_string()));
+    }
+    let io = match timeout_at(deadline, rx).await {
+        Ok(Ok(Ok(io))) => io,
+        Ok(Ok(Err(e))) => return (name, Outcome::Failed(e.to_string())),
+        Ok(Err(_)) => return (name, Outcome::Failed("open failed".into())),
+        Err(_) => return (name, Outcome::Failed("open did not return".into())),
     };
     let mut s = Session::new(io);
-    let outcome = match s.probe_ping(wait).await {
+    let left = deadline.saturating_duration_since(Instant::now());
+    let outcome = match s.probe_ping(left).await {
         Ok(true) => Outcome::Pong,
         Ok(false) => Outcome::Silent,
         Err(e) => Outcome::Failed(e.to_string()),
@@ -100,12 +119,11 @@ async fn ping_port(name: String, baud: u32, wait: Duration) -> (String, Outcome)
 
 /// PING every FTDI port at `baud` for up to `wait` and return the one the
 /// monitor answers on. All ports are PINGed at once; after the first PONG
-/// the rest get until [`SETTLE`] after the start, then count as silent.
+/// the rest get [`SETTLE`] more, then count as silent.
 pub async fn find(baud: u32, wait: Duration) -> Result<String, ProbeError> {
     let ports = serialport::available_ports().map_err(|e| ProbeError::List(e.to_string()))?;
     let names = ftdi_ports(&ports);
     crate::transport::link_log(&format!("probing FTDI ports: {names:?}"));
-    let start = Instant::now();
     let mut set = JoinSet::new();
     for name in &names {
         set.spawn(ping_port(name.clone(), baud, wait));
@@ -126,12 +144,7 @@ pub async fn find(baud: u32, wait: Duration) -> Result<String, ProbeError> {
             Err(e) => (String::from("?"), Outcome::Failed(e.to_string())),
         };
         if outcome == Outcome::Pong && cutoff.is_none() {
-            cutoff = Some(
-                start
-                    .checked_add(SETTLE)
-                    .unwrap_or(start)
-                    .max(Instant::now()),
-            );
+            cutoff = Some(deadline_after(SETTLE));
         }
         results.push((name, outcome));
     }
