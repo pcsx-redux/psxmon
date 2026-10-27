@@ -331,6 +331,12 @@ impl<T: Transport> Session<T> {
         self.ping_resync(wait, payload, true).await
     }
 
+    /// PING until PONG for up to `wait`, without the resync zeros: for a
+    /// port that may not have a monitor on it at all (see [`crate::probe`]).
+    pub async fn probe_ping(&mut self, wait: Duration) -> Result<bool> {
+        self.ping_resync(wait, &[], false).await
+    }
+
     /// [`Session::ping`] with the zeros optional: the SET_BAUD windows wait
     /// for exact PING bytes, not inside a frame, and are too short for them.
     async fn ping_resync(&mut self, wait: Duration, payload: &[u16], resync: bool) -> Result<bool> {

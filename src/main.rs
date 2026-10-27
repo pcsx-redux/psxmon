@@ -22,6 +22,7 @@ use psxmon::session::{LoadOptions, Session, deadline_after};
 use psxmon::transport::{self, parse_tcp_port};
 use psxmon::{
     AtconsTransport, SerialTransport, TcpTransport, Transport, atcons, bios, exe, h2700, iso, lz4,
+    probe,
 };
 
 /// A session on whichever link --port names.
@@ -53,9 +54,11 @@ struct Link {
     /// Serial device the monitor is on; `tcp:HOST:PORT` (or
     /// `tcp://HOST:PORT`) for a TCP link such as PCSX-Redux's SIO1 server;
     /// or `atcons[:BASE]` for the DTL-H2700's ISA card (base 0x1340 by
-    /// default; x86 Linux, root).
+    /// default; x86 Linux, root). Left out (and no `PSXMON_PORT`), every
+    /// FTDI USB serial port is PINGed at --baud and the one that answers is
+    /// used; no other kind of port is opened.
     #[arg(long, env = "PSXMON_PORT")]
-    port: String,
+    port: Option<String>,
     /// Line rate the monitor listens at after boot (not used on TCP or
     /// ATCONS).
     #[arg(long, default_value_t = 115200)]
@@ -266,14 +269,22 @@ const HELLO_WAIT: Duration = Duration::from_millis(300);
 
 async fn attach(link: &Link) -> Result<MonSession> {
     transport::set_link_log(link.verbose);
-    if let Some(base) = atcons::parse_port(&link.port) {
+    let port = match &link.port {
+        Some(port) => port.clone(),
+        None => {
+            let wait = seconds(link.attach_timeout, "--attach-timeout")?;
+            let port = probe::find(link.baud, wait).await?;
+            eprintln!("psxmon: monitor found on {port}");
+            port
+        }
+    };
+    if let Some(base) = atcons::parse_port(&port) {
         return attach_atcons(link, base.map_err(anyhow::Error::msg)?).await;
     }
-    if let Some(addr) = parse_tcp_port(&link.port) {
+    if let Some(addr) = parse_tcp_port(&port) {
         return attach_tcp(link, addr).await;
     }
-    let io = SerialTransport::open(&link.port, link.baud)
-        .with_context(|| format!("opening {}", link.port))?;
+    let io = SerialTransport::open(&port, link.baud).with_context(|| format!("opening {port}"))?;
     let mut s: MonSession = Session::new(Box::new(io));
     // A monitor an earlier SET_BAUD left at a faster rate does not answer at
     // --baud, so fall back to the rates it can have been left at: the boot
@@ -288,10 +299,7 @@ async fn attach(link: &Link) -> Result<MonSession> {
     });
     let first_wait = seconds(link.attach_timeout, "--attach-timeout")?;
     let Some(rate) = s.attach_at(&rates, first_wait, PROBE_WAIT).await? else {
-        bail!(
-            "no PONG from the monitor on {} at {rates:?} baud",
-            link.port
-        );
+        bail!("no PONG from the monitor on {port} at {rates:?} baud");
     };
     if rate != link.baud {
         eprintln!("psxmon: monitor answered at {rate} baud, not {}", link.baud);
@@ -576,7 +584,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
             "psxmon: load took {} ms {}; run pc=0x{:08x} gp=0x{:08x} sp=0x{:08x}",
             t0.elapsed().as_millis(),
             match s.transport().baud_rate() {
-                0 => format!("on {}", link.port),
+                0 => format!("on {}", link.port.as_deref().unwrap_or_default()),
                 b => format!("at {b} baud"),
             },
             image.pc,

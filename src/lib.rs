@@ -14,6 +14,7 @@ pub mod iso;
 pub mod lz4;
 pub mod mips;
 pub mod pcdrv;
+pub mod probe;
 pub mod proto;
 pub mod ram;
 pub mod rate;

@@ -35,7 +35,8 @@ binary is a thin command line on top of it.
     psxmon mkdisc <exe> -o FILE.bin [--license FILE] [--no-pad]
 
 `--port DEV` is the serial port the monitor is on (see below), or
-`PSXMON_PORT` when `--port` is left out. `--port tcp:HOST:PORT` (or
+`PSXMON_PORT` when `--port` is left out. With neither, psxmon looks for
+the monitor itself (see below). `--port tcp:HOST:PORT` (or
 `tcp://HOST:PORT`) connects to the monitor's byte stream over TCP, for
 example PCSX-Redux's SIO1 server. `--port atcons` (or `atcons:BASE`,
 default base 0x1340) uses the DTL-H2700's ISA card instead; see below.
@@ -134,6 +135,14 @@ need nothing special; a name that already starts with `\` (`\\.\COM14`)
 is used as is. On macOS use the `/dev/cu.*` node; `/dev/tty.*` waits for
 carrier detect. On Linux the user needs access to the
 device, usually through the `dialout` or `uucp` group.
+
+With no `--port` and no `PSXMON_PORT`, psxmon PINGs every FTDI USB serial
+port (vendor 0403) at `--baud` and uses the one the monitor answers on,
+saying which on stderr. Other ports are never opened: opening one toggles
+DTR, which resets an Arduino or drops an ESP32 into its bootloader. It
+fails if no FTDI port answers, or lists the ports if more than one does.
+A monitor left at a faster rate is not found this way; pass `--port`.
+Other adapters (CP210x, PL2303, CH340) need `--port`.
 
 For PCSX-Redux, turn on its SIO1 server in raw mode and connect to it:
 
