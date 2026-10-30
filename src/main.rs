@@ -186,6 +186,23 @@ enum Cmd {
         #[command(flatten)]
         link: Link,
     },
+    /// Download the target's VRAM to a file. The monitor saves the
+    /// raw VRAM contents to ram at 0x80080000. If any memory write
+    /// operation overwrites this area, the VRAM dump may be corrupted.
+    Getvram {
+        /// Output file (default: vram.bin, or vram.png with --png).
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Write a 1024x512 PNG, decoding the data as 16-bit 1555 pixels
+        /// (the mask bit is ignored), instead of the raw bytes.
+        #[arg(long)]
+        png: bool,
+        /// With --png, crop to WxH+X+Y pixels (offsets default to 0).
+        #[arg(long, value_name = "WxH+X+Y", requires = "png", value_parser = parse_crop)]
+        crop: Option<Crop>,
+        #[command(flatten)]
+        link: Link,
+    },
     /// Write a file into target memory.
     Write {
         #[arg(value_parser = parse_u32)]
@@ -876,6 +893,121 @@ async fn dump(addr: u32, len: u32, output: PathBuf, link: Link) -> Result<ExitCo
     Ok(ExitCode::SUCCESS)
 }
 
+const VRAM_ADDR: u32 = 0x8008_0000;
+const VRAM_WIDTH: u32 = 1024;
+const VRAM_HEIGHT: u32 = 512;
+const VRAM_BYTES: u32 = 0x10_0000;
+
+/// A VRAM sub-rectangle in pixels.
+#[derive(Clone, Copy)]
+struct Crop {
+    w: u32,
+    h: u32,
+    x: u32,
+    y: u32,
+}
+
+impl Crop {
+    const FULL: Self = Self {
+        w: VRAM_WIDTH,
+        h: VRAM_HEIGHT,
+        x: 0,
+        y: 0,
+    };
+}
+
+/// Parse WxH+X+Y (the offsets are optional and default to 0) and check that
+/// the rectangle is non-empty and inside the 1024x512 surface.
+fn parse_crop(s: &str) -> Result<Crop, String> {
+    let bad = || format!("expected WxH+X+Y, got {s:?}");
+    let num = |t: &str| t.parse::<u32>().map_err(|_| bad());
+    let (w, rest) = s.split_once('x').ok_or_else(bad)?;
+    let mut parts = rest.split('+');
+    let h = parts.next().ok_or_else(bad)?;
+    let x = parts.next().map_or(Ok(0), num)?;
+    let y = parts.next().map_or(Ok(0), num)?;
+    if parts.next().is_some() {
+        return Err(bad());
+    }
+    let c = Crop {
+        w: num(w)?,
+        h: num(h)?,
+        x,
+        y,
+    };
+    let fits = c.x.checked_add(c.w).is_some_and(|r| r <= VRAM_WIDTH)
+        && c.y.checked_add(c.h).is_some_and(|b| b <= VRAM_HEIGHT);
+    if c.w == 0 || c.h == 0 || !fits {
+        return Err(format!(
+            "crop {s:?} is empty or outside the {VRAM_WIDTH}x{VRAM_HEIGHT} surface"
+        ));
+    }
+    Ok(c)
+}
+
+/// Expand a 5-bit channel to 8 bits, replicating the top bits into the low.
+fn expand5(v: u16) -> u8 {
+    let v = u8::try_from(v & 0x1f).unwrap_or(0);
+    (v << 3) | (v >> 2)
+}
+
+/// Decode the crop rectangle of little-endian 1555 pixels (R in bits 0-4,
+/// G 5-9, B 10-14) to opaque RGB8.
+fn vram_to_rgb(raw: &[u8], crop: Crop) -> Vec<u8> {
+    raw.chunks(VRAM_WIDTH as usize * 2)
+        .skip(crop.y as usize)
+        .take(crop.h as usize)
+        .flat_map(|row| {
+            row.as_chunks::<2>()
+                .0
+                .iter()
+                .skip(crop.x as usize)
+                .take(crop.w as usize)
+        })
+        .flat_map(|&p| {
+            let px = u16::from_le_bytes(p);
+            [expand5(px), expand5(px >> 5), expand5(px >> 10)]
+        })
+        .collect()
+}
+
+fn write_png(path: &Path, rgb: &[u8], crop: Crop) -> Result<()> {
+    let file =
+        std::fs::File::create(path).with_context(|| format!("writing {}", path.display()))?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), crop.w, crop.h);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    let ctx = || format!("writing {}", path.display());
+    let mut writer = enc.write_header().with_context(ctx)?;
+    writer.write_image_data(rgb).with_context(ctx)?;
+    writer.finish().with_context(ctx)
+}
+
+async fn getvram(
+    output: Option<PathBuf>,
+    png: bool,
+    crop: Option<Crop>,
+    link: Link,
+) -> Result<ExitCode> {
+    if !png {
+        let output = output.unwrap_or_else(|| PathBuf::from("vram.bin"));
+        return dump(VRAM_ADDR, VRAM_BYTES, output, link).await;
+    }
+    let output = output.unwrap_or_else(|| PathBuf::from("vram.png"));
+    let crop = crop.unwrap_or(Crop::FULL);
+    let mut s = attach(&link).await?;
+    let data = s.read_mem(VRAM_ADDR, VRAM_BYTES).await?;
+    let raw = data
+        .get(..VRAM_BYTES as usize)
+        .context("short read from target")?;
+    write_png(&output, &vram_to_rgb(raw, crop), crop)?;
+    eprintln!(
+        "psxmon: read {VRAM_BYTES} bytes at 0x{VRAM_ADDR:08x} to {}",
+        output.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn write(addr: u32, file: PathBuf, link: Link) -> Result<ExitCode> {
     let data = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
     let mut s = attach(&link).await?;
@@ -965,6 +1097,12 @@ async fn dispatch(cmd: Cmd) -> Result<ExitCode> {
             output,
             link,
         } => dump(addr, len, output, link).await,
+        Cmd::Getvram {
+            output,
+            png,
+            crop,
+            link,
+        } => getvram(output, png, crop, link).await,
         Cmd::Write { addr, file, link } => write(addr, file, link).await,
         Cmd::PatchH2700 {
             stock,

@@ -22,6 +22,7 @@ miniz_oxide = "0.9.1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "macros", "time", "io-util", "io-std", "sync", "net"] }
 serialport = { version = "4.10", default-features = false }
+png = "0.18.1"
 
 # ATCONS port I/O (ioperm).
 [target.'cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))'.dependencies]
