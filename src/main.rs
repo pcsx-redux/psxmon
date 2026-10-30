@@ -193,8 +193,8 @@ enum Cmd {
         /// Output file (default: vram.bin, or vram.png with --png).
         #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
-        /// Write a 1024x512 PNG, decoding the data as 16-bit 1555 pixels
-        /// (the mask bit is ignored), instead of the raw bytes.
+        /// Write a PNG, 1024x512 or the --crop size, decoding the data as
+        /// 16-bit 1555 pixels (the mask bit is ignored), instead of the raw bytes.
         #[arg(long)]
         png: bool,
         /// With --png, crop to WxH+X+Y pixels (offsets default to 0).

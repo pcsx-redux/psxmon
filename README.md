@@ -29,6 +29,7 @@ binary is a thin command line on top of it.
     psxmon reset --port DEV
     psxmon dump <addr> <len> -o FILE --port DEV
     psxmon write <addr> <file> --port DEV
+    psxmon getvram [-o FILE] [--png [--crop WxH+X+Y]] --port DEV
     psxmon h2700-reset [--mode 7] [--port atcons[:BASE]] [--no-connect]
                        [--console SECS]
     psxmon patch-h2700 <stock> <monitor> -o FILE
@@ -101,6 +102,12 @@ or `0x` hex.
   it takes interrupts (STOP, see PROTOCOL.md); otherwise it fails like
   `ping`, and it is the power button. On the H2700, `h2700-reset` drives the
   hardware reset line instead.
+- `getvram` reads the copy of VRAM the monitor's loader saves at boot, the
+  1 MiB at 0x80080000, and writes it raw (`vram.bin`) or, with `--png`, as a
+  1024x512 RGB image (`vram.png`, the mask bit dropped). `--crop` cuts a
+  rectangle out of the PNG. With the monitor on a cart, press reset on a
+  running program and the copy holds its last frames; anything written to
+  that RAM since boot, a program loaded there included, overwrites it.
 - `patch-h2700` builds a flash image for the H2700 from the OpenBIOS
   monitor ELF and STOCK, either a dump of the cart's own 512 KiB flash or
   the FLASH27 kit's `H2700.IMG` (patched in place, same length, only its
