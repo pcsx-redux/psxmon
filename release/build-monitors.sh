@@ -58,7 +58,7 @@ clean
 # of the cart's flash at 0x1f000000. The cart loader (rom.s) copies the PS-EXE
 # into RAM before it runs, so the monitor's EXP1 setup never moves timing
 # under code fetched from the flash.
-for board in orion; do
+for board in orion powerreplay; do
     tmp=$(mktemp -d)
     mipsel-none-elf-gcc -march=mips1 -mabi=32 -EL -c -o "$tmp/rom.o" \
         "-DPSEXE=\"$out/monitor-ft232h-$board.ps-exe\"" -x assembler-with-cpp "$cart/rom.s"
