@@ -18,6 +18,7 @@ pub mod probe;
 pub mod proto;
 pub mod ram;
 pub mod rate;
+pub mod screen;
 pub mod session;
 pub mod stepsim;
 pub mod transport;
