@@ -1032,20 +1032,21 @@ async fn getscreen(output: Option<PathBuf>, link: Link) -> Result<ExitCode> {
         .context("short read from target")?;
     let mode = state.mode();
     eprintln!(
-        "psxmon: display {}x{} {}-bit{}{}{}, drawing area at {},{}",
+        "psxmon: display {}x{} {}-bit{}{}, drawing area at {},{}",
         mode.width,
         mode.height,
         if mode.depth24 { 24 } else { 15 },
         if mode.interlaced { " interlaced" } else { "" },
         if mode.pal { " PAL" } else { "" },
-        if mode.display_on {
-            ""
-        } else {
-            ", display was off"
-        },
         state.draw_x,
         state.draw_y
     );
+    if !mode.display_on {
+        eprintln!(
+            "psxmon: the display was off, so the screen was black; \
+             writing the buffers it would have shown anyway"
+        );
+    }
     let size = Crop {
         w: mode.width,
         h: mode.height,
