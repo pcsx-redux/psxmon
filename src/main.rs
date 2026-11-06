@@ -18,6 +18,7 @@ use psxmon::proto::{
     self, CAP_LZ4, CAP_SLOT, CAP_STOP, CAP_WATCHDOG, HELLO, STOP_EXIT, STOP_FAULT,
 };
 use psxmon::rate::RateMeter;
+use psxmon::screen;
 use psxmon::session::{LoadOptions, Session, deadline_after};
 use psxmon::transport::{self, parse_tcp_port};
 use psxmon::{
@@ -200,6 +201,11 @@ enum Cmd {
         /// With --png, crop to WxH+X+Y pixels (offsets default to 0).
         #[arg(long, value_name = "WxH+X+Y", requires = "png", value_parser = parse_crop)]
         crop: Option<Crop>,
+        /// Write the picture that was on screen as a PNG (default screen.png), in
+        /// the display mode the program left. Which buffer was shown is a GUESS:
+        /// the other likely buffers go to FILE-alt1.png and FILE-alt2.png.
+        #[arg(long, conflicts_with_all = ["png", "crop"])]
+        screen: bool,
         #[command(flatten)]
         link: Link,
     },
@@ -987,8 +993,12 @@ async fn getvram(
     output: Option<PathBuf>,
     png: bool,
     crop: Option<Crop>,
+    screen: bool,
     link: Link,
 ) -> Result<ExitCode> {
+    if screen {
+        return getscreen(output, link).await;
+    }
     if !png {
         let output = output.unwrap_or_else(|| PathBuf::from("vram.bin"));
         return dump(VRAM_ADDR, VRAM_BYTES, output, link).await;
@@ -1006,6 +1016,72 @@ async fn getvram(
         output.display()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// `getvram --screen`: the guessed on-screen picture, plus the other candidates.
+async fn getscreen(output: Option<PathBuf>, link: Link) -> Result<ExitCode> {
+    let output = output.unwrap_or_else(|| PathBuf::from("screen.png"));
+    let mut s = attach(&link).await?;
+    let block = s.read_mem(screen::STATE_ADDR, screen::STATE_LEN).await?;
+    let state = screen::GpuState::parse(&block).context(
+        "no GPU state at 0x80180000: the monitor predates it, or a program has overwritten it",
+    )?;
+    let data = s.read_mem(VRAM_ADDR, VRAM_BYTES).await?;
+    let vram = data
+        .get(..VRAM_BYTES as usize)
+        .context("short read from target")?;
+    let mode = state.mode();
+    eprintln!(
+        "psxmon: display {}x{} {}-bit{}{}, drawing area at {},{}",
+        mode.width,
+        mode.height,
+        if mode.depth24 { 24 } else { 15 },
+        if mode.interlaced { " interlaced" } else { "" },
+        if mode.pal { " PAL" } else { "" },
+        state.draw_x,
+        state.draw_y
+    );
+    if !mode.display_on {
+        eprintln!(
+            "psxmon: the display was off, so the screen was black; \
+             writing the buffers it would have shown anyway"
+        );
+    }
+    let size = Crop {
+        w: mode.width,
+        h: mode.height,
+        x: 0,
+        y: 0,
+    };
+    for (i, c) in screen::candidates(&state, vram).iter().enumerate() {
+        let path = if i == 0 {
+            output.clone()
+        } else {
+            alt_path(&output, i)
+        };
+        write_png(&path, &screen::picture(vram, c.x, c.y, &mode), size)?;
+        let what = match c.why {
+            screen::Why::Neighbour => "the neighbour buffer closest to the one being drawn",
+            screen::Why::DrawBuffer => "the buffer being drawn",
+            screen::Why::DrawArea => "the drawing area's corner",
+        };
+        let label = if i == 0 { "guess" } else { "alternative" };
+        eprintln!(
+            "psxmon: {label}: VRAM {},{} ({what}) to {}",
+            c.x,
+            c.y,
+            path.display()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `screen.png` -> `screen-alt1.png`.
+fn alt_path(output: &Path, i: usize) -> PathBuf {
+    let stem = output
+        .file_stem()
+        .map_or_else(|| "screen".into(), |s| s.to_string_lossy().into_owned());
+    output.with_file_name(format!("{stem}-alt{i}.png"))
 }
 
 async fn write(addr: u32, file: PathBuf, link: Link) -> Result<ExitCode> {
@@ -1101,8 +1177,9 @@ async fn dispatch(cmd: Cmd) -> Result<ExitCode> {
             output,
             png,
             crop,
+            screen,
             link,
-        } => getvram(output, png, crop, link).await,
+        } => getvram(output, png, crop, screen, link).await,
         Cmd::Write { addr, file, link } => write(addr, file, link).await,
         Cmd::PatchH2700 {
             stock,

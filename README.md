@@ -29,7 +29,7 @@ binary is a thin command line on top of it.
     psxmon reset --port DEV
     psxmon dump <addr> <len> -o FILE --port DEV
     psxmon write <addr> <file> --port DEV
-    psxmon getvram [-o FILE] [--png [--crop WxH+X+Y]] --port DEV
+    psxmon getvram [-o FILE] [--png [--crop WxH+X+Y] | --screen] --port DEV
     psxmon h2700-reset [--mode 7] [--port atcons[:BASE]] [--no-connect]
                        [--console SECS]
     psxmon patch-h2700 <stock> <monitor> -o FILE
@@ -108,6 +108,15 @@ or `0x` hex.
   rectangle out of the PNG. With the monitor on a cart, press reset on a
   running program and the copy holds its last frames; anything written to
   that RAM since boot, a program loaded there included, overwrites it.
+  `--screen` writes the picture that was on screen instead (`screen.png`),
+  in the display mode the program left, from the GPU state the loader saves
+  at 0x80180000. Which buffer was shown is a guess, because the display
+  start cannot be read back: the other likely buffers go to
+  `screen-alt1.png` and `screen-alt2.png`. In PCSX-Redux, over seven games
+  the rule was not tuned on, the guess was the displayed buffer 66% of the
+  time and one of the three files held it 83% of the time. Triple buffering,
+  games that draw into the shown buffer, and 24-bit movies are where it
+  misses.
 - `patch-h2700` builds a flash image for the H2700 from the OpenBIOS
   monitor ELF and STOCK, either a dump of the cart's own 512 KiB flash or
   the FLASH27 kit's `H2700.IMG` (patched in place, same length, only its
