@@ -88,8 +88,8 @@ or `0x` hex.
   with its two-PING confirmation). The host is set to the rate SIO1 really
   sends at, 33868800 / 16 / reload (235200 for reload 9), because some
   adapters misread the PS1 at the nominal rate. If the new rate does not
-  answer, psxmon falls back to the old one. The monitor keeps the new rate,
-  so later commands need `--baud 235200`.
+  answer, psxmon falls back to the old one. After a successful switch the
+  monitor keeps the new rate, so later commands need `--baud 235200`.
 - If the monitor does not answer at `--baud`, psxmon tries 115200, 235200
   and the `--fast-reload` rate, in that order. It says on stderr which rate
   answered.
