@@ -64,7 +64,8 @@ struct Link {
     /// ATCONS).
     #[arg(long, default_value_t = 115200)]
     baud: u32,
-    /// SIO1 reload to switch to after attaching (9 = 230400, 5 = 414720).
+    /// SIO1 reload to switch to after attaching (9 = 230400, 5 = 414720
+    /// nominal; the host uses the true rate, 235200 and 423360).
     #[arg(long, value_name = "RELOAD")]
     fast_reload: Option<u16>,
     /// Seconds to PING for before giving up on the monitor.
@@ -311,9 +312,10 @@ async fn attach(link: &Link) -> Result<MonSession> {
     let mut s: MonSession = Session::new(Box::new(io));
     // A monitor an earlier SET_BAUD left at a faster rate does not answer at
     // --baud, so fall back to the rates it can have been left at: the boot
-    // rate, 230400 (reload 9), and whatever --fast-reload names.
-    let mut rates = vec![link.baud, proto::sio1_rate(18), proto::sio1_rate(9)];
-    rates.extend(link.fast_reload.map(proto::sio1_rate));
+    // rate, reload 9, and whatever --fast-reload names, each at the rate
+    // SIO1 really sends at.
+    let mut rates = vec![link.baud, proto::sio1_rate(18), proto::sio1_true_rate(9)];
+    rates.extend(link.fast_reload.map(proto::sio1_true_rate));
     let mut seen = Vec::new();
     rates.retain(|r| {
         let fresh = !seen.contains(r);
@@ -331,7 +333,7 @@ async fn attach(link: &Link) -> Result<MonSession> {
     s.take_text();
     if let Some(reload) = link.fast_reload {
         let rate = s.negotiate_rate(reload).await?;
-        if rate != proto::sio1_rate(reload) {
+        if rate != proto::sio1_true_rate(reload) {
             eprintln!("psxmon: reload {reload} did not answer, staying at {rate} baud");
         }
     }

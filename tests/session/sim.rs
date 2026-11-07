@@ -664,7 +664,7 @@ impl Sim {
         self.rate = if self.cfg.unreachable_rate {
             1
         } else {
-            sio1_rate(reload)
+            sio1_true_rate(reload)
         };
         if self.await_exact(&PING_BYTES).await {
             self.send_frame(PONG, &[PROTO_VER]).await;

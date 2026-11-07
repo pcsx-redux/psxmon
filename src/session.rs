@@ -879,7 +879,7 @@ impl<T: Transport> Session<T> {
             Some(f) if f.ty == ACK => {}
             _ => return Ok(old),
         }
-        let new = proto::sio1_rate(reload);
+        let new = proto::sio1_true_rate(reload);
         sleep(Duration::from_millis(20)).await;
         self.io.set_baud_rate(new)?;
         if self.ping_resync(RATE_TRY, &[], false).await?

@@ -145,6 +145,20 @@ pub fn sio1_rate(reload: u16) -> u32 {
         .unwrap_or(SIO1_RATE_CLOCK)
 }
 
+/// SIO1 at x16 really runs at the CPU clock (33868800 Hz) / 16 / reload.
+pub const SIO1_TRUE_CLOCK: u32 = 2_116_800;
+
+/// Rate SIO1 actually sends at for a reload value (9 -> 235200, 2% above
+/// the nominal 230400). Some adapters misread the PS1 at the nominal rate
+/// from 230400 up, so the host side of a SET_BAUD uses this one.
+pub fn sio1_true_rate(reload: u16) -> u32 {
+    let reload = u32::from(reload.max(1));
+    SIO1_TRUE_CLOCK
+        .saturating_add(reload / 2)
+        .checked_div(reload)
+        .unwrap_or(SIO1_TRUE_CLOCK)
+}
+
 /// A software `break code1, code2`, decoded from its instruction word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BreakCode {
@@ -192,5 +206,9 @@ mod tests {
         assert_eq!(BreakCode::decode(0x0000_0000), None);
         assert_eq!(sio1_rate(18), 115200);
         assert_eq!(sio1_rate(9), 230400);
+        assert_eq!(sio1_true_rate(18), 117600);
+        assert_eq!(sio1_true_rate(9), 235200);
+        assert_eq!(sio1_true_rate(5), 423360);
+        assert_eq!(sio1_true_rate(0), SIO1_TRUE_CLOCK);
     }
 }
