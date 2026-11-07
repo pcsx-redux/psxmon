@@ -389,9 +389,9 @@ async fn set_baud_short_pong_keeps_caps_and_bios() {
     let (mut s, stats) = attach(SimConfig::default(), Box::new(Hang)).await;
     assert_eq!((s.caps, s.bios), (CAP_LZ4, Some(BIOS)));
     let rate = s.negotiate_rate(9).await.expect("SET_BAUD");
-    assert_eq!(rate, 230400);
-    assert_eq!(s.transport().baud_rate(), 230400);
-    assert_eq!(lock(&stats).rate, 230400);
+    assert_eq!(rate, 235200);
+    assert_eq!(s.transport().baud_rate(), 235200);
+    assert_eq!(lock(&stats).rate, 235200);
     // The two window PONGs carried only [proto_ver].
     assert_eq!((s.caps, s.bios), (CAP_LZ4, Some(BIOS)));
     assert!(s.ping(Duration::from_secs(1), &[]).await.expect("ping"));
