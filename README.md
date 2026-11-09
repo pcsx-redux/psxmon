@@ -370,6 +370,8 @@ submodule. The links fetch the latest release.
 | [`monitor-ft232h-picodev-usb.zip`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-picodev-usb.zip) | disc image of the above | FT232H, Pico-Dev, USB channel | burn it, boot it | as the `.ps-exe` |
 | [`monitor-ft232h-picodev-uart.ps-exe`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-picodev-uart.ps-exe) | monitor on the retail BIOS | FT232H, Pico-Dev, UART channel | load it with any PS-EXE loader | no |
 | [`monitor-ft232h-picodev-uart.zip`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-picodev-uart.zip) | disc image of the above | FT232H, Pico-Dev, UART channel | burn it, boot it | as the `.ps-exe` |
+| [`monitor-ft232h-picodev-usb.booty`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-picodev-usb.booty) | boot payload of the USB-channel monitor | FT232H, Pico-Dev, USB channel | build Pico-Dev firmware with it, see [Pico-Dev firmware](#pico-dev-firmware) | no |
+| [`monitor-ft232h-picodev-uart.booty`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-picodev-uart.booty) | boot payload of the UART-channel monitor | FT232H, Pico-Dev, UART channel | as above | no |
 | [`monitor-ft232h-piodev-lite.ps-exe`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-piodev-lite.ps-exe) | monitor on the retail BIOS | FT232H, PIO-Dev-Lite | load it with any PS-EXE loader | no |
 | [`monitor-ft232h-piodev-lite.zip`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-piodev-lite.zip) | disc image of the above | FT232H, PIO-Dev-Lite | burn it, boot it | as the `.ps-exe` |
 | [`monitor-ft232h-orion.ps-exe`](https://github.com/pcsx-redux/psxmon/releases/latest/download/monitor-ft232h-orion.ps-exe) | monitor on the retail BIOS | FT232H-style link, Orion cart | load it with any PS-EXE loader | SCPH-1001, SCPH-5502, SCPH-7502 |
@@ -387,6 +389,27 @@ submodule. The links fetch the latest release.
 | [`openbios-ft232h-orion.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-ft232h-orion.rom) | OpenBIOS with the monitor, 512 KiB BIOS ROM | FT232H-style link, Orion cart | program a replacement BIOS chip | no |
 | [`openbios-ft232h-piodev-lite-cart.rom`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-ft232h-piodev-lite-cart.rom) | OpenBIOS with the monitor, cartridge | FT232H, PIO-Dev-Lite | flash the PIO-Dev-Lite; OpenBIOS takes over at boot | no |
 | [`openbios-atcons-h2700.elf`](https://github.com/pcsx-redux/psxmon/releases/latest/download/openbios-atcons-h2700.elf) | OpenBIOS with the monitor, for the DTL-H2700 | ATCONS | `psxmon patch-h2700 stock.bin openbios-atcons-h2700.elf -o flash.bin`, flash, `psxmon h2700-reset --mode 7`, then `ping`, `run`, `gdb`, `dump` or `write` with `--port atcons` | yes |
+
+## Pico-Dev firmware
+
+The [Pico-Dev](https://github.com/johnbaumann/PicoDev) firmware feeds the
+console a boot payload in place of a cartridge ROM. The two `.booty` files
+are the monitor as that payload: a Pico-Dev flashed with one boots into the
+monitor.
+
+The releases carry no Pico-Dev firmware: the PicoDev repository has no
+license, so its firmware cannot be redistributed. Build it locally with:
+
+    tools/build-picodev-uf2.sh monitor-ft232h-picodev-usb.booty PicoDev-psxmon.uf2
+
+This clones PicoDev at a pinned commit, swaps its `payload/unirom_r.booty`
+for the given file, and builds `PicoDev.uf2` with the
+[Pico SDK](https://github.com/raspberrypi/pico-sdk). Needs git, cmake, make,
+a host C++ compiler, `arm-none-eabi-gcc` (on `PATH` or under
+`PICO_TOOLCHAIN_PATH`), and the SDK with tinyusb in `PICO_SDK_PATH`; tested
+with SDK 2.3.1 and Arm GNU 14.2.rel1. It exits with an error when any of
+these is missing or the pinned commit no longer matches. To flash, hold
+BOOTSEL while plugging in the Pico and copy the UF2 to the RPI-RP2 drive.
 
 ## Build
 
