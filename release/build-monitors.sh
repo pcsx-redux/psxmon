@@ -10,6 +10,8 @@
 #   monitor-sio1-cart.rom           flash cartridge image, SIO1
 #   monitor-ft232h-<board>.ps-exe   PS-EXE, FT232H on the expansion port;
 #                                   boards in nugget monitor/hosts/ft232h-boards.mk
+#   monitor-ft232h-picodev-*.booty  boot payload of the same for the Pico-Dev
+#                                   firmware (release/mkbooty.sh)
 #   monitor-ft232h-<board>.rom      flash cartridge image of the same, for
 #                                   boards that decode the FTDI clear of the
 #                                   flash
@@ -53,6 +55,12 @@ for board in psx232h-a20 psx232h-a0 picodev-usb picodev-uart piodev-lite orion p
     cp "$retail/monitor-retail.ps-exe" "$out/monitor-ft232h-$board.ps-exe"
 done
 clean
+
+# Boot payloads for the Pico-Dev firmware, which feeds one to the console in
+# place of a cartridge ROM; tools/build-picodev-uf2.sh builds the firmware.
+for board in picodev-usb picodev-uart; do
+    "$(dirname "$0")/mkbooty.sh" "$out/monitor-ft232h-$board.ps-exe" "$out/monitor-ft232h-$board.booty"
+done
 
 # Cart images of the FT232H monitor, for boards whose FIFO is decoded clear
 # of the cart's flash at 0x1f000000. The cart loader (rom.s) copies the PS-EXE

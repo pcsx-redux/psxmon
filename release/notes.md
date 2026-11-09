@@ -4,6 +4,7 @@ Monitor on the retail BIOS kernel:
 - `monitor-sio1.ps-exe`, `monitor-sio1.zip`: load or boot it, talk to it over the serial port. The zip is the disc image, a `.bin` and its `.cue`.
 - `monitor-sio1-cart.rom`: flash cartridge image; the console boots straight into the monitor.
 - `monitor-ft232h-<board>.ps-exe`, `.zip` (disc image): FT232H on the expansion port, one image per board, since the link addresses are fixed at build time. Boards: `psx232h-a20`, `psx232h-a0`, `picodev-usb`, `picodev-uart`, `piodev-lite`, `orion`, `powerreplay`. The `piodev-lite` addresses are read off its schematic.
+- `monitor-ft232h-picodev-usb.booty`, `monitor-ft232h-picodev-uart.booty`: the Pico-Dev monitors as boot payloads for the Pico-Dev firmware. There is no prebuilt firmware, since PicoDev has no license; `tools/build-picodev-uf2.sh` in the repository builds it with one of these.
 - `monitor-ft232h-orion.rom`: flash cartridge image of the Orion monitor; the console boots straight into it.
 
 OpenBIOS with the monitor:
