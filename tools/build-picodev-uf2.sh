@@ -44,7 +44,13 @@ fi
 src=${PICODEV_DIR:-$(mktemp -d)}
 mkdir -p "$src"
 cd "$src"
-[ -d .git ] || git init -q
+# The tree gets force-checked-out and its build directory removed, so only
+# reuse one this script made.
+if [ ! -e .build-picodev-uf2 ]; then
+    [ -z "$(ls -A)" ] || die "$src is not empty and was not made by this script"
+    git init -q
+    : > .build-picodev-uf2
+fi
 git fetch -q --depth 1 "$PICODEV_URL" "$PICODEV_COMMIT" ||
     die "cannot fetch $PICODEV_COMMIT from $PICODEV_URL"
 git -c advice.detachedHead=false checkout -q --force FETCH_HEAD
