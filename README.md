@@ -169,6 +169,44 @@ For PCSX-Redux, turn on its SIO1 server in raw mode and connect to it:
 The same form reaches a serial-to-TCP bridge (ser2net or similar) in raw
 mode; the bridge sets the line rate.
 
+## Serial rates
+
+SIO1 sends from a divider on the system clock, so its rates are discrete. In
+the x16 mode psxmon uses, rate = 33868800 / 16 / reload = 2116800 / reload.
+`--fast-reload RELOAD` sets the console to that reload and the host to the
+same true rate. Unirom and some other tools name the rates by 2073600 /
+reload instead, a few percent below the real one.
+
+| reload | true rate | nominal |
+|-------:|----------:|--------:|
+| 18     | 117600    | 115200  |
+| 9      | 235200    | 230400  |
+| 8      | 264600    | 259200  |
+| 5      | 423360    | 414720  |
+| 4      | 529200    | 518400  |
+| 3      | 705600    | 691200  |
+| 2      | 1058400   | 1036800 |
+
+When the adapter cannot make the rate, `psxmon ping --port DEV --fast-reload
+4` prints `reload 4 did not answer, staying at 115200 baud` and the link
+keeps working at the old rate. A System 573 or GV build loads LZ4 up to
+518400 baud and gets plain LOAD above it.
+
+An adapter is only as close to the true rate as its own divider allows, and
+a few percent off already garbles the line. Host rates measured on the
+console's serial port:
+
+| adapter | clean | garbled |
+|---------|-------|---------|
+| FT232R cable (SharkLink) | 230400 | 414720, 518400 |
+| CH340 | 518400 | |
+| CP2102, plug on the port | 115200, 230400, 256000 | 460800 and 500000 against reloads 5 and 4 |
+
+The CP2102 driver rounds a request to the nearest rate the chip has (115200,
+128000, 153600, 230400, 250000, 256000, 460800, 500000, 921600, 1000000), so
+reloads 5 to 2 land 6 to 15 percent off. A CP2102N or an FT232R-class chip
+has a fine enough divider for them.
+
 ## Flashing a DTL-H2700
 
 Rewriting the cart's own flash needs Sony's FLASH27 kit
