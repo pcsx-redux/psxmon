@@ -202,10 +202,12 @@ console's serial port:
 | CH340 | 518400 | |
 | CP2102, plug on the port | 115200, 230400, 256000 | 460800 and 500000 against reloads 5 and 4 |
 
-The CP2102 driver rounds a request to the nearest rate the chip has (115200,
-128000, 153600, 230400, 250000, 256000, 460800, 500000, 921600, 1000000), so
-reloads 5 to 2 land 6 to 15 percent off. A CP2102N or an FT232R-class chip
-has a fine enough divider for them.
+The CP2102 driver rounds a request to one of the rates the chip has (115200,
+128000, 153600, 230400, 250000, 256000, 460800, 500000, 921600, 1000000).
+Reload 5 (423360) comes out at 460800, 9% high; reload 4 (529200) at 500000
+and reload 2 (1058400) at 1000000, 5.5% low; reload 3 (705600) at 921600,
+31% high. A CP2102N or an FT232R-class chip has a fine enough divider for
+them.
 
 ## Flashing a DTL-H2700
 
